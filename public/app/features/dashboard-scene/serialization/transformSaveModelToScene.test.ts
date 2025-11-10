@@ -25,15 +25,15 @@ import { DashboardModel } from 'app/features/dashboard/state/DashboardModel';
 import { PanelModel } from 'app/features/dashboard/state/PanelModel';
 import { createPanelSaveModel } from 'app/features/dashboard/state/__fixtures__/dashboardFixtures';
 import { SHARED_DASHBOARD_QUERY, DASHBOARD_DATASOURCE_PLUGIN_ID } from 'app/plugins/datasource/dashboard/constants';
-import { DashboardDataDTO } from 'app/types';
+import { DashboardDataDTO } from 'app/types/dashboard';
 
 import { DashboardDataLayerSet } from '../scene/DashboardDataLayerSet';
 import { LibraryPanelBehavior } from '../scene/LibraryPanelBehavior';
-import { PanelTimeRange } from '../scene/PanelTimeRange';
 import { DashboardGridItem } from '../scene/layout-default/DashboardGridItem';
 import { DefaultGridLayoutManager } from '../scene/layout-default/DefaultGridLayoutManager';
 import { RowRepeaterBehavior } from '../scene/layout-default/RowRepeaterBehavior';
 import { RowsLayoutManager } from '../scene/layout-rows/RowsLayoutManager';
+import { PanelTimeRange } from '../scene/panel-timerange/PanelTimeRange';
 import { NEW_LINK } from '../settings/links/utils';
 import { getQueryRunnerFor } from '../utils/utils';
 
@@ -964,6 +964,9 @@ describe('transformSaveModelToScene', () => {
                 config: {},
               },
             ],
+            scopedVars: {
+              var1: { value: 'value1', text: 'text1' },
+            },
           },
         ],
       }) as Panel;
@@ -985,6 +988,30 @@ describe('transformSaveModelToScene', () => {
         { config: {}, name: 'Field 1', type: 'time' },
         { config: {}, name: 'Field 2', type: 'number' },
       ]);
+    });
+
+    it('should translate scopedVars to local variable value', () => {
+      const panel = createPanelSaveModel({
+        title: 'test',
+        gridPos: { x: 1, y: 0, w: 12, h: 8 },
+        targets: [
+          {
+            queryType: 'snapshot',
+          },
+        ],
+        // @ts-ignore
+        scopedVars: {
+          var1: { value: 'value1', text: 'text1' },
+        },
+      }) as Panel;
+
+      const oldPanelModel = new PanelModel(panel);
+      const scenePanel = buildGridItemForPanel(oldPanelModel);
+      const vizPanel = scenePanel.state.body;
+
+      expect(vizPanel.state.$variables?.state.variables[0].state.name).toBe('var1');
+      expect(vizPanel.state.$variables?.state.variables[0].getValue()).toBe('value1');
+      expect(vizPanel.state.$variables?.state.variables[0].getValueText?.()).toBe('text1');
     });
   });
 });

@@ -1,10 +1,15 @@
 import { css } from '@emotion/css';
 import { Resizable } from 're-resizable';
-import { useCallback, useRef } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 
-import { GrafanaTheme2 } from '@grafana/data';
-import { getDragStyles, useStyles2 } from '@grafana/ui';
+import { GrafanaTheme2, TimeRange } from '@grafana/data';
+import { t } from '@grafana/i18n';
+import { reportInteraction } from '@grafana/runtime';
+import { getDragStyles, Icon, Tab, TabsBar, useStyles2 } from '@grafana/ui';
 
+import { getSidebarWidth } from '../fieldSelector/FieldSelector';
+
+import { getDetailsScrollPosition, saveDetailsScrollPosition, useLogDetailsContext } from './LogDetailsContext';
 import { LogLineDetailsComponent } from './LogLineDetailsComponent';
 import { useLogListContext } from './LogListContext';
 import { LogListModel } from './processing';
@@ -12,56 +17,206 @@ import { LOG_LIST_MIN_WIDTH } from './virtualization';
 
 export interface Props {
   containerElement: HTMLDivElement;
-  logOptionsStorageKey?: string;
+  focusLogLine: (log: LogListModel) => void;
   logs: LogListModel[];
-  onResize(): void;
+  timeRange: TimeRange;
+  timeZone: string;
+  showControls: boolean;
 }
 
-export const LogLineDetails = ({ containerElement, logOptionsStorageKey, logs, onResize }: Props) => {
-  const { detailsWidth, setDetailsWidth, showDetails } = useLogListContext();
-  const styles = useStyles2(getStyles);
-  const dragStyles = useStyles2(getDragStyles);
-  const containerRef = useRef<HTMLDivElement | null>(null);
+export type LogLineDetailsMode = 'inline' | 'sidebar';
 
-  const handleResize = useCallback(() => {
-    if (containerRef.current) {
-      setDetailsWidth(containerRef.current.clientWidth);
-    }
-    onResize();
-  }, [onResize, setDetailsWidth]);
+export const LogLineDetails = memo(
+  ({ containerElement, focusLogLine, logs, timeRange, timeZone, showControls }: Props) => {
+    const { noInteractions, logOptionsStorageKey } = useLogListContext();
+    const { detailsWidth, setDetailsWidth } = useLogDetailsContext();
+    const styles = useStyles2(getStyles, 'sidebar', showControls);
+    const dragStyles = useStyles2(getDragStyles);
+    const containerRef = useRef<HTMLDivElement | null>(null);
 
-  const maxWidth = containerElement.clientWidth - LOG_LIST_MIN_WIDTH;
+    const handleResize = useCallback(() => {
+      if (containerRef.current) {
+        setDetailsWidth(containerRef.current.clientWidth);
+      }
+    }, [setDetailsWidth]);
 
-  if (!showDetails.length) {
-    return null;
+    const reportResize = useCallback(() => {
+      if (containerRef.current && !noInteractions) {
+        reportInteraction('logs_log_line_details_sidebar_resized', {
+          width: Math.round(containerRef.current.clientWidth),
+        });
+      }
+    }, [noInteractions]);
+
+    const maxWidth = containerElement.clientWidth - getSidebarWidth(logOptionsStorageKey) - LOG_LIST_MIN_WIDTH;
+
+    return (
+      <Resizable
+        onResize={handleResize}
+        onResizeStop={reportResize}
+        handleClasses={{ left: dragStyles.dragHandleVertical }}
+        defaultSize={{ width: detailsWidth, height: containerElement.clientHeight }}
+        size={{ width: detailsWidth, height: containerElement.clientHeight }}
+        enable={{ left: true }}
+        minWidth={40}
+        maxWidth={maxWidth}
+      >
+        <div className={styles.container} ref={containerRef}>
+          <LogLineDetailsTabs focusLogLine={focusLogLine} logs={logs} timeRange={timeRange} timeZone={timeZone} />
+        </div>
+      </Resizable>
+    );
   }
+);
+LogLineDetails.displayName = 'LogLineDetails';
+
+const LogLineDetailsTabs = memo(
+  ({ focusLogLine, logs, timeRange, timeZone }: Pick<Props, 'focusLogLine' | 'logs' | 'timeRange' | 'timeZone'>) => {
+    const { app, noInteractions, wrapLogMessage } = useLogListContext();
+    const { currentLog, setCurrentLog, showDetails, toggleDetails } = useLogDetailsContext();
+
+    const styles = useStyles2(getStyles, 'sidebar');
+
+    useEffect(() => {
+      // When wrapping is enabled and details is in sidebar mode, the logs panel width changes and the
+      // user may lose focus of the log line, so we scroll to it.
+      if (wrapLogMessage && currentLog) {
+        focusLogLine(currentLog);
+      }
+      if (!noInteractions) {
+        reportInteraction('logs_log_line_details_displayed', {
+          mode: 'sidebar',
+          app,
+        });
+      }
+      // Once
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const tabs = useMemo(() => showDetails.slice().reverse(), [showDetails]);
+
+    if (!currentLog) {
+      return null;
+    }
+
+    return (
+      <>
+        {showDetails.length > 1 && (
+          <TabsBar>
+            {tabs.map((log) => {
+              return (
+                <Tab
+                  key={log.uid}
+                  truncate
+                  label={log.entry.substring(0, 25)}
+                  active={currentLog.uid === log.uid}
+                  onChangeTab={() => setCurrentLog(log)}
+                  suffix={() => (
+                    <Icon
+                      name="times"
+                      aria-label={t('logs.log-line-details.remove-log', 'Remove log')}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleDetails(log);
+                      }}
+                    />
+                  )}
+                />
+              );
+            })}
+          </TabsBar>
+        )}
+        <div className={styles.scrollContainer}>
+          <LogLineDetailsComponent
+            focusLogLine={focusLogLine}
+            log={currentLog}
+            logs={logs}
+            timeRange={timeRange}
+            timeZone={timeZone}
+          />
+        </div>
+      </>
+    );
+  }
+);
+LogLineDetailsTabs.displayName = 'LogLineDetailsTabs';
+
+export interface InlineLogLineDetailsProps {
+  log: LogListModel;
+  logs: LogListModel[];
+  onResize(): void;
+  timeRange: TimeRange;
+  timeZone: string;
+}
+
+export const InlineLogLineDetails = memo(({ logs, log, onResize, timeRange, timeZone }: InlineLogLineDetailsProps) => {
+  const { app, noInteractions } = useLogListContext();
+  const { detailsWidth } = useLogDetailsContext();
+  const styles = useStyles2(getStyles, 'inline');
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!noInteractions) {
+      reportInteraction('logs_log_line_details_displayed', {
+        mode: 'inline',
+        app,
+      });
+    }
+  }, [app, noInteractions]);
+
+  useEffect(() => {
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [onResize]);
+
+  const saveScroll = useCallback(() => {
+    saveDetailsScrollPosition(log, scrollRef.current?.scrollTop ?? 0);
+  }, [log]);
+
+  useEffect(() => {
+    if (!scrollRef.current) {
+      return;
+    }
+    scrollRef.current.scrollTop = getDetailsScrollPosition(log);
+  }, [log]);
 
   return (
-    <Resizable
-      onResize={handleResize}
-      handleClasses={{ left: dragStyles.dragHandleVertical }}
-      defaultSize={{ width: detailsWidth, height: containerElement.clientHeight }}
-      size={{ width: detailsWidth, height: containerElement.clientHeight }}
-      enable={{ left: true }}
-      minWidth={40}
-      maxWidth={maxWidth}
-    >
-      <div className={styles.container} ref={containerRef}>
-        <div className={styles.scrollContainer}>
-          <LogLineDetailsComponent log={showDetails[0]} logOptionsStorageKey={logOptionsStorageKey} logs={logs} />
+    <div className={`${styles.inlineWrapper} log-line-inline-details`} style={{ maxWidth: detailsWidth }}>
+      <div className={styles.inlineContainer}>
+        <div className={styles.scrollContainer} ref={scrollRef} onScroll={saveScroll}>
+          <LogLineDetailsComponent log={log} logs={logs} timeRange={timeRange} timeZone={timeZone} />
         </div>
       </div>
-    </Resizable>
+    </div>
   );
-};
+});
+InlineLogLineDetails.displayName = 'InlineLogLineDetails';
 
-const getStyles = (theme: GrafanaTheme2) => ({
-  container: css({
-    overflow: 'auto',
+export const LOG_LINE_DETAILS_HEIGHT = 45;
+
+const getStyles = (theme: GrafanaTheme2, mode: LogLineDetailsMode, showControls?: boolean) => ({
+  inlineWrapper: css({
+    gridColumn: '1 / -1',
+    height: `${LOG_LINE_DETAILS_HEIGHT}vh`,
+    padding: theme.spacing(1, 2, 1.5, 2),
+    marginRight: 1,
+  }),
+  inlineContainer: css({
+    backgroundColor: theme.colors.background.secondary,
+    border: `1px solid ${theme.colors.border.weak}`,
+    borderRadius: theme.shape.radius.default,
     height: '100%',
-    boxShadow: theme.shadows.z1,
-    border: `1px solid ${theme.colors.border.medium}`,
-    borderRight: 'none',
+    overflow: 'auto',
+  }),
+  container: css({
+    backgroundColor: theme.colors.background.elevated,
+    border: `1px solid ${theme.colors.border.weak}`,
+    borderBottomRightRadius: showControls ? undefined : theme.shape.radius.default,
+    borderRight: mode === 'sidebar' && showControls ? 'none' : undefined,
+    borderTopRightRadius: showControls ? undefined : theme.shape.radius.default,
+    boxShadow: theme.shadows.z3,
+    height: '100%',
+    overflow: 'auto',
   }),
   scrollContainer: css({
     overflow: 'auto',

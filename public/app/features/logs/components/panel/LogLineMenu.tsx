@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, MouseEvent } from 'react';
+import { MouseEvent, useCallback, useMemo, useRef } from 'react';
 
 import { LogRowContextOptions, LogRowModel } from '@grafana/data';
 import { t } from '@grafana/i18n';
@@ -7,6 +7,7 @@ import { Dropdown, IconButton, Menu } from '@grafana/ui';
 
 import { copyText, handleOpenLogsContextClick } from '../../utils';
 
+import { useLogDetailsContext } from './LogDetailsContext';
 import { LogLineStyles } from './LogLine';
 import { useLogIsPinned, useLogListContext } from './LogListContext';
 import { LogListModel } from './processing';
@@ -29,14 +30,13 @@ type MenuItemDivider = {
 export type LogLineMenuCustomItem = MenuItem | MenuItemDivider;
 
 interface Props {
+  active?: boolean;
   log: LogListModel;
   styles: LogLineStyles;
 }
 
-export const LogLineMenu = ({ log, styles }: Props) => {
+export const LogLineMenu = ({ active, log, styles }: Props) => {
   const {
-    enableLogDetails,
-    detailsDisplayed,
     getRowContextQuery,
     onOpenContext,
     onPermalinkClick,
@@ -44,8 +44,10 @@ export const LogLineMenu = ({ log, styles }: Props) => {
     onUnpinLine,
     logLineMenuCustomItems = [],
     logSupportsContext,
-    toggleDetails,
+    isAssistantAvailable,
+    openAssistantByLog,
   } = useLogListContext();
+  const { enableLogDetails, detailsDisplayed, toggleDetails } = useLogDetailsContext();
   const pinned = useLogIsPinned(log);
   const menuRef = useRef(null);
 
@@ -81,6 +83,8 @@ export const LogLineMenu = ({ log, styles }: Props) => {
     }
   }, [log, onPinLine, onUnpinLine, pinned]);
 
+  const showFirstDivider = enableLogDetails || shouldlogSupportsContext || onPinLine || onUnpinLine;
+
   const menu = useCallback(
     () => (
       <Menu ref={menuRef}>
@@ -103,7 +107,7 @@ export const LogLineMenu = ({ log, styles }: Props) => {
         {pinned && onUnpinLine && (
           <Menu.Item onClick={togglePinning} label={t('logs.log-line-menu.unpin-from-outline', 'Unpin log')} />
         )}
-        <Menu.Divider />
+        {showFirstDivider && <Menu.Divider />}
         <Menu.Item onClick={copyLogLine} label={t('logs.log-line-menu.copy-log', 'Copy log line')} />
         {onPermalinkClick && log.rowId !== undefined && log.uid && (
           <Menu.Item onClick={copyLinkToLogLine} label={t('logs.log-line-menu.copy-link', 'Copy link to log line')} />
@@ -117,6 +121,16 @@ export const LogLineMenu = ({ log, styles }: Props) => {
           }
           return null;
         })}
+        {isAssistantAvailable && (
+          <>
+            <Menu.Divider />
+            <Menu.Item
+              onClick={() => openAssistantByLog?.(log)}
+              icon="ai-sparkle"
+              label={t('logs.log-line-menu.open-assistant', 'Explain log line in Assistant')}
+            />
+          </>
+        )}
       </Menu>
     ),
     [
@@ -124,14 +138,17 @@ export const LogLineMenu = ({ log, styles }: Props) => {
       copyLogLine,
       detailsDisplayed,
       enableLogDetails,
+      isAssistantAvailable,
       log,
       logLineMenuCustomItems,
       onPermalinkClick,
       onPinLine,
       onUnpinLine,
+      openAssistantByLog,
       pinned,
       shouldlogSupportsContext,
       showContext,
+      showFirstDivider,
       toggleLogDetails,
       togglePinning,
     ]
@@ -141,8 +158,10 @@ export const LogLineMenu = ({ log, styles }: Props) => {
     <Dropdown overlay={menu} placement="bottom-start">
       <IconButton
         className={styles.menuIcon}
-        name="ellipsis-v"
+        name={active ? 'angle-right' : 'ellipsis-v'}
         aria-label={t('logs.log-line-menu.icon-label', 'Log menu')}
+        role="button"
+        variant={active ? 'primary' : undefined}
       />
     </Dropdown>
   );

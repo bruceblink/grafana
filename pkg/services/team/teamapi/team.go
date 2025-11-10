@@ -257,7 +257,7 @@ func (tapi *TeamAPI) getTeamByID(c *contextmodel.ReqContext) response.Response {
 	return response.JSON(http.StatusOK, &queryResult)
 }
 
-// swagger:route GET /teams/{team_id}/preferences teams getTeamPreferences
+// swagger:route GET /teams/{team_id}/preferences teams preferences getTeamPreferences
 //
 // Get Team Preferences.
 //
@@ -274,7 +274,7 @@ func (tapi *TeamAPI) getTeamPreferences(c *contextmodel.ReqContext) response.Res
 	return prefapi.GetPreferencesFor(c.Req.Context(), tapi.ds, tapi.preferenceService, tapi.features, c.GetOrgID(), 0, teamId)
 }
 
-// swagger:route PUT /teams/{team_id}/preferences teams updateTeamPreferences
+// swagger:route PUT /teams/{team_id}/preferences teams preferences updateTeamPreferences
 //
 // Update Team Preferences.
 //
@@ -344,6 +344,13 @@ type SearchTeamsParams struct {
 	// If set it will return results where the query value is contained in the name field. Query values with spaces need to be URL encoded.
 	// required:false
 	Query string `json:"query"`
+	// in:query
+	// required:false
+	// default: false
+	AccessControl bool `json:"accesscontrol"`
+	// in:query
+	// required:false
+	Sort string `json:"sort"`
 }
 
 // swagger:parameters createTeam
@@ -431,7 +438,8 @@ func (tapi *TeamAPI) validateTeam(c *contextmodel.ReqContext, teamID int64, prov
 		return response.Error(http.StatusInternalServerError, "Failed to get Team", err)
 	}
 
-	if teamDTO.IsProvisioned {
+	isGroupSyncEnabled := tapi.cfg.Raw.Section("auth.scim").Key("group_sync_enabled").MustBool(false)
+	if isGroupSyncEnabled && teamDTO.IsProvisioned {
 		return response.Error(http.StatusBadRequest, provisionedMessage, err)
 	}
 

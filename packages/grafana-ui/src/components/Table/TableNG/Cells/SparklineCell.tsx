@@ -1,17 +1,8 @@
 import { css } from '@emotion/css';
-import { Property } from 'csstype';
 import * as React from 'react';
 
-import {
-  FieldType,
-  FieldConfig,
-  getMinMaxAndDelta,
-  FieldSparkline,
-  isDataFrame,
-  Field,
-  isDataFrameWithValue,
-  GrafanaTheme2,
-} from '@grafana/data';
+import { FieldConfig, getMinMaxAndDelta, Field, isDataFrameWithValue } from '@grafana/data';
+import { t } from '@grafana/i18n';
 import {
   BarAlignment,
   GraphDrawStyle,
@@ -23,12 +14,12 @@ import {
   VisibilityMode,
 } from '@grafana/schema';
 
-import { useStyles2 } from '../../../../themes/ThemeContext';
 import { measureText } from '../../../../utils/measureText';
 import { FormattedValueDisplay } from '../../../FormattedValueDisplay/FormattedValueDisplay';
 import { Sparkline } from '../../../Sparkline/Sparkline';
-import { SparklineCellProps } from '../types';
-import { getAlignmentFactor, getCellOptions } from '../utils';
+import { MaybeWrapWithLink } from '../components/MaybeWrapWithLink';
+import { SparklineCellProps, TableCellStyles } from '../types';
+import { getAlignmentFactor, getCellOptions, prepareSparklineValue } from '../utils';
 
 export const defaultSparklineCellConfig: TableSparklineCellOptions = {
   type: TableCellDisplayMode.Sparkline,
@@ -44,12 +35,15 @@ export const defaultSparklineCellConfig: TableSparklineCellOptions = {
 };
 
 export const SparklineCell = (props: SparklineCellProps) => {
-  const { field, value, theme, timeRange, rowIdx, justifyContent, width } = props;
-  const styles = useStyles2(getStyles, justifyContent);
-  const sparkline = getSparkline(value);
+  const { field, value, theme, timeRange, rowIdx, width } = props;
+  const sparkline = prepareSparklineValue(value, field);
 
   if (!sparkline) {
-    return <>{field.config.noValue || 'no data'}</>;
+    return (
+      <MaybeWrapWithLink field={field} rowIdx={rowIdx}>
+        {field.config.noValue || t('grafana-ui.table.sparkline.no-data', 'no data')}
+      </MaybeWrapWithLink>
+    );
   }
 
   // Get the step from the first two values to null-fill the x-axis based on timerange
@@ -94,52 +88,16 @@ export const SparklineCell = (props: SparklineCellProps) => {
       measureText(`${alignmentFactor.prefix ?? ''}${alignmentFactor.text}${alignmentFactor.suffix ?? ''}`, 16).width +
       theme.spacing.gridSize;
 
-    valueElement = (
-      <FormattedValueDisplay
-        style={{
-          width: `${valueWidth - theme.spacing.gridSize}px`,
-          textAlign: 'right',
-          marginRight: theme.spacing(1),
-          marginLeft: theme.spacing(1),
-        }}
-        className={styles.valueContainer}
-        value={displayValue}
-      />
-    );
+    valueElement = <FormattedValueDisplay style={{ width: valueWidth }} value={displayValue} />;
   }
 
-  // @TODO update width, height
   return (
-    <div className={styles.cellContainer}>
+    <MaybeWrapWithLink field={field} rowIdx={rowIdx}>
       {valueElement}
       <Sparkline width={width - valueWidth} height={25} sparkline={sparkline} config={config} theme={theme} />
-    </div>
+    </MaybeWrapWithLink>
   );
 };
-
-function getSparkline(value: unknown): FieldSparkline | undefined {
-  if (Array.isArray(value)) {
-    return {
-      y: {
-        name: 'test',
-        type: FieldType.number,
-        values: value,
-        config: {},
-      },
-    };
-  }
-
-  if (isDataFrame(value)) {
-    const timeField = value.fields.find((x) => x.type === FieldType.time);
-    const numberField = value.fields.find((x) => x.type === FieldType.number);
-
-    if (timeField && numberField) {
-      return { x: timeField, y: numberField };
-    }
-  }
-
-  return;
-}
 
 function getTableSparklineCellOptions(field: Field): TableSparklineCellOptions {
   let options = getCellOptions(field);
@@ -152,14 +110,14 @@ function getTableSparklineCellOptions(field: Field): TableSparklineCellOptions {
   throw new Error(`Expected options type ${TableCellDisplayMode.Sparkline} but got ${options.type}`);
 }
 
-const getStyles = (theme: GrafanaTheme2, justifyContent: Property.JustifyContent | undefined) => ({
-  cellContainer: css({
-    display: 'flex',
-    width: '100%',
-    alignItems: 'center',
-    justifyContent,
-  }),
-  valueContainer: css({
-    div: { width: 'inherit' },
-  }),
-});
+export const getStyles: TableCellStyles = (theme, { textAlign }) =>
+  css({
+    '&, & > a': {
+      width: '100%',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: theme.spacing(1),
+      ...(textAlign === 'right' && { flexDirection: 'row-reverse' }),
+    },
+  });

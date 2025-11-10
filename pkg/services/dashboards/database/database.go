@@ -2,10 +2,8 @@ package database
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -15,17 +13,18 @@ import (
 	"github.com/grafana/grafana/pkg/infra/db"
 	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/infra/metrics"
+	"github.com/grafana/grafana/pkg/infra/slugify"
 	ac "github.com/grafana/grafana/pkg/services/accesscontrol"
 	"github.com/grafana/grafana/pkg/services/dashboards"
 	dashver "github.com/grafana/grafana/pkg/services/dashboardversion"
 	"github.com/grafana/grafana/pkg/services/featuremgmt"
+	"github.com/grafana/grafana/pkg/services/folder"
 	"github.com/grafana/grafana/pkg/services/libraryelements/model"
 	"github.com/grafana/grafana/pkg/services/quota"
 	"github.com/grafana/grafana/pkg/services/sqlstore"
 	"github.com/grafana/grafana/pkg/services/sqlstore/migrations"
 	"github.com/grafana/grafana/pkg/services/sqlstore/permissions"
 	"github.com/grafana/grafana/pkg/services/sqlstore/searchstore"
-	"github.com/grafana/grafana/pkg/services/star"
 	"github.com/grafana/grafana/pkg/services/store"
 	"github.com/grafana/grafana/pkg/services/tag"
 	"github.com/grafana/grafana/pkg/setting"
@@ -68,6 +67,7 @@ func ProvideDashboardStore(sqlStore db.DB, cfg *setting.Cfg, features featuremgm
 }
 
 func (d *dashboardStore) emitEntityEvent() bool {
+	//nolint:staticcheck // not yet migrated to OpenFeature
 	return d.features != nil && d.features.IsEnabledGlobally(featuremgmt.FlagPanelTitleSearch)
 }
 
@@ -98,6 +98,7 @@ func (d *dashboardStore) GetDashboardsByLibraryPanelUID(ctx context.Context, lib
 	return connectedDashboards, err
 }
 
+// nolint:gocyclo
 func (d *dashboardStore) ValidateDashboardBeforeSave(ctx context.Context, dash *dashboards.Dashboard, overwrite bool) (bool, error) {
 	ctx, span := tracer.Start(ctx, "dashboards.database.ValidateDashboardBeforesave")
 	defer span.End()
@@ -109,7 +110,7 @@ func (d *dashboardStore) ValidateDashboardBeforeSave(ctx context.Context, dash *
 
 		// we don't save FolderID in kubernetes object when saving through k8s
 		// this block guarantees we save dashboards with folder_id and folder_uid in those cases
-		if !dash.IsFolder && dash.FolderUID != "" && dash.FolderID == 0 { // nolint:staticcheck
+		if !dash.IsFolder && dash.FolderUID != "" && dash.FolderID == 0 && dash.FolderUID != folder.GeneralFolderUID { // nolint:staticcheck
 			var existing dashboards.Dashboard
 			folderIdFound, err := sess.Where("uid=? AND org_id=?", dash.FolderUID, dash.OrgID).Get(&existing)
 			if err != nil {
@@ -208,7 +209,7 @@ func (d *dashboardStore) GetProvisionedDataByDashboardID(ctx context.Context, da
 		return sess.Table(`dashboard`).
 			Join(`INNER`, `dashboard_provisioning`, `dashboard.id = dashboard_provisioning.dashboard_id`).
 			Where(`dashboard_provisioning.dashboard_id = ?`, dashboardID).
-			Select("dashboard.*, dashboard_provisioning.name, dashboard_provisioning.external_id, dashboard_provisioning.updated as provisioning_updated, dashboard_provisioning.check_sum").
+			Select("dashboard.id, dashboard.uid, dashboard.title, dashboard.folder_uid, dashboard.org_id, dashboard_provisioning.name, dashboard_provisioning.external_id, dashboard_provisioning.updated as provisioning_updated, dashboard_provisioning.check_sum").
 			Find(&data)
 	})
 	if err != nil {
@@ -240,7 +241,7 @@ func (d *dashboardStore) GetProvisionedDataByDashboardUID(ctx context.Context, o
 		return sess.Table(`dashboard`).
 			Join(`INNER`, `dashboard_provisioning`, `dashboard.id = dashboard_provisioning.dashboard_id`).
 			Where(`dashboard_provisioning.dashboard_id = ?`, dashboard.ID).
-			Select("dashboard.*, dashboard_provisioning.name, dashboard_provisioning.external_id, dashboard_provisioning.updated as provisioning_updated, dashboard_provisioning.check_sum").
+			Select("dashboard.id, dashboard.uid, dashboard.title, dashboard.folder_uid, dashboard.org_id, dashboard_provisioning.name, dashboard_provisioning.external_id, dashboard_provisioning.updated as provisioning_updated, dashboard_provisioning.check_sum").
 			Find(&provisionedDashboard)
 	})
 	if err != nil {
@@ -274,7 +275,7 @@ func (d *dashboardStore) GetProvisionedDashboardsByName(ctx context.Context, nam
 		return sess.Table(`dashboard`).
 			Join(`INNER`, `dashboard_provisioning`, `dashboard.id = dashboard_provisioning.dashboard_id`).
 			Where(`dashboard_provisioning.name = ? AND dashboard.org_id = ?`, name, orgID).
-			Select("dashboard.*, dashboard_provisioning.name, dashboard_provisioning.external_id, dashboard_provisioning.updated as provisioning_updated, dashboard_provisioning.check_sum").
+			Select("dashboard.id, dashboard.uid, dashboard.title, dashboard.folder_uid, dashboard.org_id, dashboard_provisioning.name, dashboard_provisioning.external_id, dashboard_provisioning.updated as provisioning_updated, dashboard_provisioning.check_sum").
 			Find(&dashes)
 	})
 	if err != nil {
@@ -294,6 +295,56 @@ func (d *dashboardStore) GetOrphanedProvisionedDashboards(ctx context.Context, n
 			Where(`dashboard.org_id = ?`, orgID).
 			NotIn(`dashboard_provisioning.name`, notIn).Find(&dashes)
 	})
+	if err != nil {
+		return nil, err
+	}
+	return dashes, nil
+}
+
+func (d *dashboardStore) GetDuplicateProvisionedDashboards(ctx context.Context) ([]*dashboards.DashboardProvisioningSearchResults, error) {
+	ctx, span := tracer.Start(ctx, "dashboards.database.GetDuplicateProvisionedDashboards")
+	defer span.End()
+
+	dashes := []*dashboards.DashboardProvisioningSearchResults{}
+	err := d.store.WithDbSession(ctx, func(sess *db.Session) error {
+		type duplicateGroup struct {
+			Name       string `xorm:"name"`
+			ExternalID string `xorm:"external_id"`
+			CheckSum   string `xorm:"check_sum"`
+		}
+
+		duplicateGroups := []duplicateGroup{}
+		err := sess.SQL(`
+			SELECT dp.name, dp.external_id
+			FROM dashboard_provisioning dp
+			INNER JOIN dashboard d ON d.id = dp.dashboard_id
+			GROUP BY dp.name, dp.external_id, dp.check_sum 
+			HAVING COUNT(*) > 1
+		`).Find(&duplicateGroups)
+
+		if err != nil {
+			return err
+		}
+
+		if len(duplicateGroups) == 0 {
+			return nil
+		}
+
+		for _, group := range duplicateGroups {
+			var groupDashes []*dashboards.DashboardProvisioningSearchResults
+			err := sess.Table(`dashboard`).
+				Join(`INNER`, `dashboard_provisioning`, `dashboard.id = dashboard_provisioning.dashboard_id`).
+				Where(`dashboard_provisioning.name = ? AND dashboard_provisioning.external_id = ?`, group.Name, group.ExternalID).
+				Find(&groupDashes)
+			if err != nil {
+				return err
+			}
+			dashes = append(dashes, groupDashes...)
+		}
+
+		return nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
@@ -349,34 +400,6 @@ func (d *dashboardStore) UnprovisionDashboard(ctx context.Context, id int64) err
 	return d.store.WithTransactionalDbSession(ctx, func(sess *db.Session) error {
 		_, err := sess.Where("dashboard_id = ?", id).Delete(&dashboards.DashboardProvisioning{})
 		return err
-	})
-}
-
-func (d *dashboardStore) DeleteOrphanedProvisionedDashboards(ctx context.Context, cmd *dashboards.DeleteOrphanedProvisionedDashboardsCommand) error {
-	ctx, span := tracer.Start(ctx, "dashboards.database.DeleteOrphanedProvisionedDashboards")
-	defer span.End()
-
-	return d.store.WithDbSession(ctx, func(sess *db.Session) error {
-		var result []*dashboards.DashboardProvisioning
-
-		convertedReaderNames := make([]any, len(cmd.ReaderNames))
-		for index, readerName := range cmd.ReaderNames {
-			convertedReaderNames[index] = readerName
-		}
-
-		err := sess.NotIn("name", convertedReaderNames...).Find(&result)
-		if err != nil {
-			return err
-		}
-
-		for _, deleteDashCommand := range result {
-			err := d.DeleteDashboard(ctx, &dashboards.DeleteDashboardCommand{ID: deleteDashCommand.DashboardID})
-			if err != nil && !errors.Is(err, dashboards.ErrDashboardNotFound) {
-				return err
-			}
-		}
-
-		return nil
 	})
 }
 
@@ -607,6 +630,7 @@ func (d *dashboardStore) deleteDashboard(cmd *dashboards.DeleteDashboardCommand,
 		{SQL: "DELETE FROM dashboard_version WHERE dashboard_id = ?", args: []any{dashboard.ID}},
 		{SQL: "DELETE FROM dashboard_provisioning WHERE dashboard_id = ?", args: []any{dashboard.ID}},
 		{SQL: "DELETE FROM dashboard_acl WHERE dashboard_id = ?", args: []any{dashboard.ID}},
+		{SQL: "DELETE FROM library_element_connection WHERE connection_id = ?", args: []any{dashboard.ID}},
 	}
 
 	if dashboard.IsFolder {
@@ -619,14 +643,20 @@ func (d *dashboardStore) deleteDashboard(cmd *dashboards.DeleteDashboardCommand,
 			return err
 		}
 
-		// remove all access control permission with folder scope
-		err := d.deleteResourcePermissions(sess, dashboard.OrgID, dashboards.ScopeFoldersProvider.GetResourceScopeUID(dashboard.UID))
-		if err != nil {
-			return err
+		// While migrating to unified storage, we might execute commands in both stores, so we delete the permissions
+		// only when the command is executed on both stores, thus we can skip it here.
+		if cmd.RemovePermissions {
+			if err := d.deleteResourcePermissions(sess, dashboard.OrgID, dashboards.ScopeFoldersProvider.GetResourceScopeUID(dashboard.UID)); err != nil {
+				return err
+			}
 		}
 	} else {
-		if err := d.deleteResourcePermissions(sess, dashboard.OrgID, ac.GetResourceScopeUID("dashboards", dashboard.UID)); err != nil {
-			return err
+		// While migrating to unified storage, we might execute commands in both stores, so we delete the permissions
+		// only when the command is executed on both stores, thus we can skip it here.
+		if cmd.RemovePermissions {
+			if err := d.deleteResourcePermissions(sess, dashboard.OrgID, ac.GetResourceScopeUID("dashboards", dashboard.UID)); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -688,16 +718,6 @@ func (d *dashboardStore) CleanupAfterDelete(ctx context.Context, cmd *dashboards
 	})
 
 	return err
-}
-
-func (d *dashboardStore) DeleteAllDashboards(ctx context.Context, orgID int64) error {
-	ctx, span := tracer.Start(ctx, "dashboards.database.DeleteAllDashboards")
-	defer span.End()
-
-	return d.store.WithTransactionalDbSession(ctx, func(sess *db.Session) error {
-		_, err := sess.Where("org_id = ?", orgID).Delete(&dashboards.Dashboard{})
-		return err
-	})
 }
 
 // FIXME: Remove me and handle nested deletions in the service with the DashboardPermissionsService
@@ -821,58 +841,6 @@ func (d *dashboardStore) GetDashboard(ctx context.Context, query *dashboards.Get
 	return queryResult, err
 }
 
-func (d *dashboardStore) GetDashboardUIDByID(ctx context.Context, query *dashboards.GetDashboardRefByIDQuery) (*dashboards.DashboardRef, error) {
-	ctx, span := tracer.Start(ctx, "dashboards.database.GetDashboardUIDByID")
-	defer span.End()
-
-	us := &dashboards.DashboardRef{}
-	err := d.store.WithDbSession(ctx, func(sess *db.Session) error {
-		var rawSQL = `SELECT uid, slug, folder_uid from dashboard WHERE Id=?`
-		exists, err := sess.SQL(rawSQL, query.ID).Get(us)
-		if err != nil {
-			return err
-		} else if !exists {
-			return dashboards.ErrDashboardNotFound
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return us, nil
-}
-
-func (d *dashboardStore) GetDashboards(ctx context.Context, query *dashboards.GetDashboardsQuery) ([]*dashboards.Dashboard, error) {
-	ctx, span := tracer.Start(ctx, "dashboards.database.GetDashboards")
-	defer span.End()
-
-	var dashboards = make([]*dashboards.Dashboard, 0)
-	err := d.store.WithDbSession(ctx, func(sess *db.Session) error {
-		if len(query.DashboardIDs) == 0 && len(query.DashboardUIDs) == 0 {
-			return star.ErrCommandValidationFailed
-		}
-
-		// remove soft deleted dashboards from the response
-		sess.Where("deleted IS NULL")
-
-		if len(query.DashboardIDs) > 0 {
-			sess.In("id", query.DashboardIDs)
-		} else {
-			sess.In("uid", query.DashboardUIDs)
-		}
-		if query.OrgID > 0 {
-			sess.Where("org_id = ?", query.OrgID)
-		}
-
-		err := sess.Find(&dashboards)
-		return err
-	})
-	if err != nil {
-		return nil, err
-	}
-	return dashboards, nil
-}
-
 func (d *dashboardStore) FindDashboards(ctx context.Context, query *dashboards.FindPersistedDashboardsQuery) ([]dashboards.DashboardSearchProjection, error) {
 	ctx, span := tracer.Start(ctx, "dashboards.database.FindDashboards")
 	defer span.End()
@@ -924,10 +892,9 @@ func (d *dashboardStore) FindDashboards(ctx context.Context, query *dashboards.F
 
 	if len(query.FolderUIDs) > 0 {
 		filters = append(filters, searchstore.FolderUIDFilter{
-			Dialect:              d.store.GetDialect(),
-			OrgID:                orgID,
-			UIDs:                 query.FolderUIDs,
-			NestedFoldersEnabled: d.features.IsEnabled(ctx, featuremgmt.FlagNestedFolders),
+			Dialect: d.store.GetDialect(),
+			OrgID:   orgID,
+			UIDs:    query.FolderUIDs,
 		})
 	}
 
@@ -993,6 +960,9 @@ func (d *dashboardStore) FindDashboards(ctx context.Context, query *dashboards.F
 		if item.Term != "" {
 			item.Tags = append(item.Tags, item.Term)
 		}
+		if item.FolderTitle != "" {
+			item.FolderSlug = slugify.Slugify(item.FolderTitle)
+		}
 		seen[item.ID] = len(uniqueRes)
 		uniqueRes = append(uniqueRes, item)
 	}
@@ -1023,39 +993,6 @@ func (d *dashboardStore) GetDashboardTags(ctx context.Context, query *dashboards
 		return nil, err
 	}
 	return queryResult, nil
-}
-
-// CountDashboardsInFolder returns a count of all dashboards associated with the
-// given parent folder ID.
-func (d *dashboardStore) CountDashboardsInFolders(
-	ctx context.Context, req *dashboards.CountDashboardsInFolderRequest) (int64, error) {
-	ctx, span := tracer.Start(ctx, "dashboards.database.CountDashboardsInFolders")
-	defer span.End()
-
-	if len(req.FolderUIDs) == 0 {
-		return 0, nil
-	}
-	var count int64
-	err := d.store.WithDbSession(ctx, func(sess *db.Session) error {
-		metrics.MFolderIDsServiceCount.WithLabelValues(metrics.Dashboard).Inc()
-		s := strings.Builder{}
-		args := make([]any, 0, 3)
-		s.WriteString("SELECT COUNT(*) FROM dashboard WHERE ")
-		if len(req.FolderUIDs) == 1 && req.FolderUIDs[0] == "" {
-			s.WriteString("folder_uid IS NULL")
-		} else {
-			s.WriteString(fmt.Sprintf("folder_uid IN (%s)", strings.Repeat("?,", len(req.FolderUIDs)-1)+"?"))
-			for _, folderUID := range req.FolderUIDs {
-				args = append(args, folderUID)
-			}
-		}
-		s.WriteString(" AND org_id = ? AND is_folder = ? AND deleted IS NULL")
-		args = append(args, req.OrgID, d.store.GetDialect().BooleanValue(false))
-		sql := s.String()
-		_, err := sess.SQL(sql, args...).Get(&count)
-		return err
-	})
-	return count, err
 }
 
 func (d *dashboardStore) DeleteDashboardsInFolders(

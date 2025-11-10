@@ -7,10 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/grafana/alerting/models"
 	alertingNotify "github.com/grafana/alerting/notify"
+	"github.com/grafana/alerting/notify/nfstatus"
 	"github.com/prometheus/alertmanager/config"
 
 	amv2 "github.com/prometheus/alertmanager/api/v2/models"
@@ -56,6 +57,7 @@ type alertmanager struct {
 	DefaultConfiguration string
 	decryptFn            alertingNotify.GetDecryptedValueFn
 	crypto               Crypto
+	features             featuremgmt.FeatureToggles
 }
 
 // maintenanceOptions represent the options for components that need maintenance on a frequency within the Alertmanager.
@@ -87,7 +89,7 @@ func (m maintenanceOptions) MaintenanceFunc(state alertingNotify.State) (int64, 
 
 func NewAlertmanager(ctx context.Context, orgID int64, cfg *setting.Cfg, store AlertingStore, stateStore stateStore,
 	peer alertingNotify.ClusterPeer, decryptFn alertingNotify.GetDecryptedValueFn, ns notifications.Service,
-	m *metrics.Alertmanager, featureToggles featuremgmt.FeatureToggles, crypto Crypto,
+	m *metrics.Alertmanager, featureToggles featuremgmt.FeatureToggles, crypto Crypto, notificationHistorian nfstatus.NotificationHistorian,
 ) (*alertmanager, error) {
 	nflog, err := stateStore.GetNotificationLog(ctx)
 	if err != nil {
@@ -129,15 +131,16 @@ func NewAlertmanager(ctx context.Context, orgID int64, cfg *setting.Cfg, store A
 			MaxSilences:         cfg.UnifiedAlerting.AlertmanagerMaxSilencesCount,
 			MaxSilenceSizeBytes: cfg.UnifiedAlerting.AlertmanagerMaxSilenceSizeBytes,
 		},
-		EmailSender:   &emailSender{ns},
-		ImageProvider: newImageProvider(store, l.New("component", "image-provider")),
-		Decrypter:     decryptFn,
-		Version:       setting.BuildVersion,
-		TenantKey:     "orgID",
-		TenantID:      orgID,
-		Peer:          peer,
-		Logger:        l,
-		Metrics:       alertingNotify.NewGrafanaAlertmanagerMetrics(m.Registerer, l),
+		EmailSender:           &emailSender{ns},
+		ImageProvider:         newImageProvider(store, l.New("component", "image-provider")),
+		Decrypter:             decryptFn,
+		Version:               setting.BuildVersion,
+		TenantKey:             "orgID",
+		TenantID:              orgID,
+		Peer:                  peer,
+		Logger:                l,
+		Metrics:               alertingNotify.NewGrafanaAlertmanagerMetrics(m.Registerer, l),
+		NotificationHistorian: notificationHistorian,
 	}
 
 	gam, err := alertingNotify.NewGrafanaAlertmanager(opts)
@@ -154,6 +157,7 @@ func NewAlertmanager(ctx context.Context, orgID int64, cfg *setting.Cfg, store A
 		logger:               l.New("component", "alertmanager", opts.TenantKey, opts.TenantID), // similar to what the base does
 		decryptFn:            decryptFn,
 		crypto:               crypto,
+		features:             featureToggles,
 	}
 
 	return am, nil
@@ -190,7 +194,7 @@ func (am *alertmanager) SaveAndApplyDefaultConfig(ctx context.Context) error {
 		}
 
 		err = am.Store.SaveAlertmanagerConfigurationWithCallback(ctx, cmd, func() error {
-			_, err = am.applyConfig(ctx, cfg, true)
+			_, err = am.applyConfig(ctx, cfg, LogInvalidReceivers)
 			return err
 		})
 		if err != nil {
@@ -229,7 +233,7 @@ func (am *alertmanager) SaveAndApplyConfig(ctx context.Context, cfg *apimodels.P
 		}
 
 		err = am.Store.SaveAlertmanagerConfigurationWithCallback(ctx, cmd, func() error {
-			_, err = am.applyConfig(ctx, cfg, false) // fail if the autogen config is invalid
+			_, err = am.applyConfig(ctx, cfg, LogInvalidReceivers) // fail if the autogen config is invalid
 			return err
 		})
 		if err != nil {
@@ -255,7 +259,7 @@ func (am *alertmanager) ApplyConfig(ctx context.Context, dbCfg *ngmodels.AlertCo
 		// Since we will now update last_applied when autogen changes even if the user-created config remains the same.
 		// To fix this however, the local alertmanager needs to be able to tell the difference between user-created and
 		// autogen config, which may introduce cross-cutting complexity.
-		configChanged, err := am.applyConfig(ctx, cfg, true)
+		configChanged, err := am.applyConfig(ctx, cfg, ErrorOnInvalidReceivers)
 		if err != nil {
 			outerErr = fmt.Errorf("unable to apply configuration: %w", err)
 			return
@@ -323,33 +327,10 @@ func (am *alertmanager) aggregateInhibitMatchers(rules []config.InhibitRule, amu
 	}
 }
 
-func logMergeResult(l log.Logger, m apimodels.MergeResult) {
-	if len(m.RenamedReceivers) == 0 && len(m.RenamedTimeIntervals) == 0 {
-		return
-	}
-
-	logCtx := make([]any, 0, 4)
-	if len(m.RenamedTimeIntervals) > 0 {
-		rcvBuilder := strings.Builder{}
-		for from, to := range m.RenamedReceivers {
-			rcvBuilder.WriteString(fmt.Sprintf("'%s'->'%s',", from, to))
-		}
-		logCtx = append(logCtx, "renamedReceivers", fmt.Sprintf("[%s]", rcvBuilder.String()[0:rcvBuilder.Len()-1]))
-	}
-	if len(m.RenamedTimeIntervals) > 0 {
-		rcvBuilder := strings.Builder{}
-		for from, to := range m.RenamedTimeIntervals {
-			rcvBuilder.WriteString(fmt.Sprintf("'%s'->'%s',", from, to))
-		}
-		logCtx = append(logCtx, "renamedTimeIntervals", fmt.Sprintf("[%s]", rcvBuilder.String()[0:rcvBuilder.Len()-1]))
-	}
-	l.Info("Configurations merged successfully but some resources were renamed", logCtx...)
-}
-
 // applyConfig applies a new configuration by re-initializing all components using the configuration provided.
 // It returns a boolean indicating whether the user config was changed and an error.
 // It is not safe to call concurrently.
-func (am *alertmanager) applyConfig(ctx context.Context, cfg *apimodels.PostableUserConfig, skipInvalid bool) (bool, error) {
+func (am *alertmanager) applyConfig(ctx context.Context, cfg *apimodels.PostableUserConfig, onInvalid InvalidReceiversAction) (bool, error) {
 	err := am.crypto.DecryptExtraConfigs(ctx, cfg)
 	if err != nil {
 		return false, fmt.Errorf("failed to decrypt external configurations: %w", err)
@@ -359,12 +340,14 @@ func (am *alertmanager) applyConfig(ctx context.Context, cfg *apimodels.Postable
 	if err != nil {
 		return false, fmt.Errorf("failed to get full alertmanager configuration: %w", err)
 	}
-	logMergeResult(am.logger, mergeResult)
+	if logInfo := mergeResult.LogContext(); len(logInfo) > 0 {
+		am.logger.Info("Configurations merged successfully but some resources were renamed", logInfo...)
+	}
 	amConfig := mergeResult.Config
-	templates := cfg.GetMergedTemplateDefinitions()
+	templates := alertingNotify.PostableAPITemplatesToTemplateDefinitions(cfg.GetMergedTemplateDefinitions())
 
 	// Now add autogenerated config to the route.
-	err = AddAutogenConfig(ctx, am.logger, am.Store, am.Base.TenantID(), &amConfig, skipInvalid)
+	err = AddAutogenConfig(ctx, am.logger, am.Store, am.Base.TenantID(), &amConfig, onInvalid, am.features)
 	if err != nil {
 		return false, err
 	}
@@ -383,7 +366,7 @@ func (am *alertmanager) applyConfig(ctx context.Context, cfg *apimodels.Postable
 		return false, nil
 	}
 
-	receivers := PostableApiAlertingConfigToApiReceivers(amConfig)
+	receivers := alertingNotify.PostableAPIReceiversToAPIReceivers(amConfig.Receivers)
 	for _, recv := range receivers {
 		err = patchNewSecureFields(ctx, recv, alertingNotify.DecodeSecretsFromBase64, am.decryptFn)
 		if err != nil {
@@ -424,7 +407,7 @@ func patchNewSecureFields(ctx context.Context, api *alertingNotify.APIReceiver, 
 	return nil
 }
 
-func patchSettingsFromSecureSettings(ctx context.Context, integration *alertingNotify.GrafanaIntegrationConfig, key string, decode alertingNotify.DecodeSecretsFn, decrypt alertingNotify.GetDecryptedValueFn) error {
+func patchSettingsFromSecureSettings(ctx context.Context, integration *models.IntegrationConfig, key string, decode alertingNotify.DecodeSecretsFn, decrypt alertingNotify.GetDecryptedValueFn) error {
 	if _, ok := integration.SecureSettings[key]; !ok {
 		return nil
 	}

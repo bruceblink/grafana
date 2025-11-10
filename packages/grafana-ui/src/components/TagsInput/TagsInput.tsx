@@ -3,7 +3,7 @@ import { useCallback, useState, forwardRef } from 'react';
 import * as React from 'react';
 
 import { GrafanaTheme2 } from '@grafana/data';
-import { Trans } from '@grafana/i18n';
+import { t, Trans } from '@grafana/i18n';
 
 import { useStyles2, useTheme2 } from '../../themes/ThemeContext';
 import { Button } from '../Button/Button';
@@ -29,10 +29,15 @@ export interface Props {
   autoColors?: boolean;
 }
 
+/**
+ * A set of an input field and a button next to it that allows the user to add new tags. The added tags are previewed next to the input and can be removed by clicking the "X" icon. You can customize the width of the input.
+ *
+ * https://developers.grafana.com/ui/latest/index.html?path=/docs/inputs-tagsinput--docs
+ */
 export const TagsInput = forwardRef<HTMLInputElement, Props>(
   (
     {
-      placeholder = 'New tag (enter key to add)',
+      placeholder: placeholderProp,
       tags = [],
       onChange,
       width,
@@ -45,6 +50,7 @@ export const TagsInput = forwardRef<HTMLInputElement, Props>(
     },
     ref
   ) => {
+    const placeholder = placeholderProp ?? t('grafana-ui.tags-input.placeholder-new-tag', 'New tag (enter key to add)');
     const [newTagName, setNewTagName] = useState('');
     const styles = useStyles2(getStyles);
     const theme = useTheme2();

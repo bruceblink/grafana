@@ -29,6 +29,7 @@ import (
 
 	"github.com/grafana/grafana/pkg/apimachinery/identity"
 	"github.com/grafana/grafana/pkg/apimachinery/utils"
+	"github.com/grafana/grafana/pkg/configprovider"
 	"github.com/grafana/grafana/pkg/infra/localcache"
 	"github.com/grafana/grafana/pkg/infra/tracing"
 	"github.com/grafana/grafana/pkg/server"
@@ -57,10 +58,29 @@ const (
 	Org2 = "OrgB"
 )
 
+var (
+	sharedHTTPClient = &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			MaxIdleConns:        1000,
+			MaxIdleConnsPerHost: 500,
+			MaxConnsPerHost:     500,
+			IdleConnTimeout:     90 * time.Second,
+			DisableKeepAlives:   false,
+			DisableCompression:  true,
+			ForceAttemptHTTP2:   false,
+		},
+	}
+)
+
 type K8sTestHelper struct {
-	t          *testing.T
-	env        server.TestEnv
-	Namespacer request.NamespaceMapper
+	t               *testing.T
+	listenerAddress string
+	env             server.TestEnv
+	Namespacer      request.NamespaceMapper
 
 	Org1 OrgUsers // default
 	OrgB OrgUsers // some other id
@@ -87,15 +107,18 @@ func NewK8sTestHelper(t *testing.T, opts testinfra.GrafanaOpts) *K8sTestHelper {
 	// The flag only exists to support the transition from the old to the new behavior in dev/ops/prod.
 	opts.EnableFeatureToggles = append(opts.EnableFeatureToggles, featuremgmt.FlagAppPlatformGrpcClientAuth)
 	dir, path := testinfra.CreateGrafDir(t, opts)
-	_, env := testinfra.StartGrafanaEnv(t, dir, path)
+	listenerAddress, env := testinfra.StartGrafanaEnv(t, dir, path)
 
 	c := &K8sTestHelper{
-		env:        *env,
-		t:          t,
-		Namespacer: request.GetNamespaceMapper(nil),
+		env:             *env,
+		listenerAddress: listenerAddress,
+		t:               t,
+		Namespacer:      request.GetNamespaceMapper(nil),
 	}
 
-	quotaService := quotaimpl.ProvideService(c.env.SQLStore, c.env.Cfg)
+	cfgProvider, err := configprovider.ProvideService(c.env.Cfg)
+	require.NoError(c.t, err)
+	quotaService := quotaimpl.ProvideService(context.Background(), c.env.SQLStore, cfgProvider)
 	orgSvc, err := orgimpl.ProvideService(c.env.SQLStore, c.env.Cfg, quotaService)
 	require.NoError(c.t, err)
 	c.orgSvc = orgSvc
@@ -148,6 +171,10 @@ func (c *K8sTestHelper) GetEnv() server.TestEnv {
 	return c.env
 }
 
+func (c *K8sTestHelper) GetListenerAddress() string {
+	return c.listenerAddress
+}
+
 func (c *K8sTestHelper) Shutdown() {
 	err := c.env.Server.Shutdown(context.Background(), "done")
 	require.NoError(c.t, err)
@@ -178,6 +205,24 @@ type K8sResourceClient struct {
 	Resource dynamic.ResourceInterface
 }
 
+// newOptimizedRestConfig creates a base rest.Config optimized for integration tests.
+// It disables client-side rate limiting and uses an optimized HTTP transport.
+func newOptimizedRestConfig(host string) *rest.Config {
+	return &rest.Config{
+		Host: host,
+		// For integration tests against a local server, client-side rate-limiting
+		// is too low and can cause requests to be throttled.
+		QPS:   10,
+		Burst: 20,
+		// Use a shared transport optimized for high-concurrency testing
+		// against a single host.
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 50, // Default is 2, which is too low for test concurrency.
+		},
+	}
+}
+
 // This will set the expected Group/Version/Resource and return the discovery info if found
 func (c *K8sTestHelper) GetResourceClient(args ResourceClientArgs) *K8sResourceClient {
 	c.t.Helper()
@@ -202,10 +247,8 @@ func (c *K8sTestHelper) GetResourceClient(args ResourceClientArgs) *K8sResourceC
 		client, clientErr = dynamic.NewForConfig(args.User.NewRestConfig())
 	} else {
 		// Use service account token for authentication
-		cfg := &rest.Config{
-			Host:        fmt.Sprintf("http://%s", c.env.Server.HTTPServer.Listener.Addr()),
-			BearerToken: args.ServiceAccountToken,
-		}
+		cfg := newOptimizedRestConfig(fmt.Sprintf("http://%s", c.env.Server.HTTPServer.Listener.Addr()))
+		cfg.BearerToken = args.ServiceAccountToken
 		client, clientErr = dynamic.NewForConfig(cfg)
 	}
 	require.NoError(c.t, clientErr)
@@ -312,6 +355,9 @@ type OrgUsers struct {
 	Admin  User
 	Editor User
 	Viewer User
+	None   User
+
+	OrgID int64
 
 	// Separate standalone service accounts with different roles
 	AdminServiceAccount       serviceaccounts.ServiceAccountDTO
@@ -332,11 +378,10 @@ type User struct {
 }
 
 func (c *User) NewRestConfig() *rest.Config {
-	return &rest.Config{
-		Host:     c.baseURL,
-		Username: c.Identity.GetLogin(),
-		Password: c.password,
-	}
+	cfg := newOptimizedRestConfig(c.baseURL)
+	cfg.Username = c.Identity.GetLogin()
+	cfg.Password = c.password
+	return cfg
 }
 
 // Implements: apiserver.RestConfigProvider
@@ -375,8 +420,10 @@ type K8sResponse[T any] struct {
 	Status   *metav1.Status
 }
 
-type AnyResourceResponse = K8sResponse[AnyResource]
-type AnyResourceListResponse = K8sResponse[AnyResourceList]
+type (
+	AnyResourceResponse     = K8sResponse[AnyResource]
+	AnyResourceListResponse = K8sResponse[AnyResourceList]
+)
 
 func (c *K8sTestHelper) PostResource(user User, resource string, payload AnyResource) AnyResourceResponse {
 	c.t.Helper()
@@ -469,12 +516,8 @@ func DoRequest[T any](c *K8sTestHelper, params RequestParams, result *T) K8sResp
 	if params.Accept != "" {
 		req.Header.Set("Accept", params.Accept)
 	}
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	rsp, err := client.Do(req)
+
+	rsp, err := sharedHTTPClient.Do(req)
 	require.NoError(c.t, err)
 
 	r := K8sResponse[T]{
@@ -538,19 +581,21 @@ func (c *K8sTestHelper) createTestUsers(orgName string) OrgUsers {
 		Admin:  c.CreateUser("admin2", orgName, org.RoleAdmin, nil),
 		Editor: c.CreateUser("editor", orgName, org.RoleEditor, nil),
 		Viewer: c.CreateUser("viewer", orgName, org.RoleViewer, nil),
+		None:   c.CreateUser("none", orgName, org.RoleNone, nil),
 	}
+	users.OrgID = users.Admin.Identity.GetOrgID()
 
 	// Create service accounts
-	users.AdminServiceAccount = c.CreateServiceAccount(users.Admin, "admin-sa", users.Admin.Identity.GetOrgID(), org.RoleAdmin)
-	users.AdminServiceAccountToken = c.CreateServiceAccountToken(users.Admin, users.AdminServiceAccount.Id, users.Admin.Identity.GetOrgID(), "admin-token", 0)
+	users.AdminServiceAccount = c.CreateServiceAccount(users.Admin, "admin-sa", users.OrgID, org.RoleAdmin)
+	users.AdminServiceAccountToken = c.CreateServiceAccountToken(users.Admin, users.AdminServiceAccount.Id, users.OrgID, "admin-token", 0)
 
-	users.EditorServiceAccount = c.CreateServiceAccount(users.Admin, "editor-sa", users.Admin.Identity.GetOrgID(), org.RoleEditor)
-	users.EditorServiceAccountToken = c.CreateServiceAccountToken(users.Admin, users.EditorServiceAccount.Id, users.Admin.Identity.GetOrgID(), "editor-token", 0)
+	users.EditorServiceAccount = c.CreateServiceAccount(users.Admin, "editor-sa", users.OrgID, org.RoleEditor)
+	users.EditorServiceAccountToken = c.CreateServiceAccountToken(users.Admin, users.EditorServiceAccount.Id, users.OrgID, "editor-token", 0)
 
-	users.ViewerServiceAccount = c.CreateServiceAccount(users.Admin, "viewer-sa", users.Admin.Identity.GetOrgID(), org.RoleViewer)
-	users.ViewerServiceAccountToken = c.CreateServiceAccountToken(users.Admin, users.ViewerServiceAccount.Id, users.Admin.Identity.GetOrgID(), "viewer-token", 0)
+	users.ViewerServiceAccount = c.CreateServiceAccount(users.Admin, "viewer-sa", users.OrgID, org.RoleViewer)
+	users.ViewerServiceAccountToken = c.CreateServiceAccountToken(users.Admin, users.ViewerServiceAccount.Id, users.OrgID, "viewer-token", 0)
 
-	users.Staff = c.CreateTeam("staff", "staff@"+orgName, users.Admin.Identity.GetOrgID())
+	users.Staff = c.CreateTeam("staff", "staff@"+orgName, users.OrgID)
 
 	// Add Admin and Editor to Staff team as Admin and Member, respectively.
 	c.AddOrUpdateTeamMember(users.Admin, users.Staff.ID, team.PermissionTypeAdmin)
@@ -592,13 +637,20 @@ func (c *K8sTestHelper) CreateUser(name string, orgName string, basicRole org.Ro
 
 	// make org1 admins grafana admins
 	isGrafanaAdmin := basicRole == identity.RoleAdmin && orgId == 1
+	login := name
+	if isGrafanaAdmin {
+		login = "grafana-admin"
+	} else if orgId > 1 {
+		login = fmt.Sprintf("%s-%s", login, c.Namespacer(orgId))
+	}
 
 	u, err := c.userSvc.Create(context.Background(), &user.CreateUserCommand{
 		DefaultOrgRole: string(basicRole),
 		Password:       user.Password(name),
-		Login:          fmt.Sprintf("%s-%d", name, orgId),
+		Login:          login,
 		OrgID:          orgId,
 		IsAdmin:        isGrafanaAdmin,
+		Name:           name,
 	})
 
 	// for tests to work we need to add grafana admins to every org
@@ -633,6 +685,7 @@ func (c *K8sTestHelper) CreateUser(name string, orgName string, basicRole org.Ro
 	require.NoError(c.t, err)
 	s.IDToken = idToken
 	s.IDTokenClaims = idClaims
+	s.Namespace = c.Namespacer(orgId)
 
 	usr := User{
 		Identity: s,
@@ -686,16 +739,19 @@ func (c *K8sTestHelper) AddOrUpdateTeamMember(user User, teamID int64, permissio
 	require.NoError(c.t, err)
 }
 
-func (c *K8sTestHelper) NewDiscoveryClient() *discovery.DiscoveryClient {
+func (c *K8sTestHelper) NewAdminRestConfig() *rest.Config {
 	c.t.Helper()
 
 	baseUrl := fmt.Sprintf("http://%s", c.env.Server.HTTPServer.Listener.Addr())
-	conf := &rest.Config{
-		Host:     baseUrl,
-		Username: c.Org1.Admin.Identity.GetLogin(),
-		Password: c.Org1.Admin.password,
-	}
-	client, err := discovery.NewDiscoveryClientForConfig(conf)
+	cfg := newOptimizedRestConfig(baseUrl)
+	cfg.Username = c.Org1.Admin.Identity.GetLogin()
+	cfg.Password = c.Org1.Admin.password
+	return cfg
+}
+
+func (c *K8sTestHelper) NewDiscoveryClient() *discovery.DiscoveryClient {
+	c.t.Helper()
+	client, err := discovery.NewDiscoveryClientForConfig(c.NewAdminRestConfig())
 	require.NoError(c.t, err)
 	return client
 }
@@ -742,8 +798,12 @@ func (c *K8sTestHelper) GetGroupVersionInfoJSON(group string) string {
 func (c *K8sTestHelper) CreateDS(cmd *datasources.AddDataSourceCommand) *datasources.DataSource {
 	c.t.Helper()
 
+	require.NotZero(c.t, cmd.OrgID, "requires a non zero orgId")
 	dataSource, err := c.env.Server.HTTPServer.DataSourcesService.AddDataSource(context.Background(), cmd)
 	require.NoError(c.t, err)
+	if cmd.UID != "" {
+		require.Equal(c.t, cmd.UID, dataSource.UID)
+	}
 	return dataSource
 }
 
@@ -766,7 +826,7 @@ func VerifyOpenAPISnapshots(t *testing.T, dir string, gv schema.GroupVersion, h 
 		return // skip invalid groups
 	}
 	path := fmt.Sprintf("/openapi/v3/apis/%s/%s", gv.Group, gv.Version)
-	t.Run(path, func(t *testing.T) {
+	t.Run(path[1:], func(t *testing.T) {
 		rsp := DoRequest(h, RequestParams{
 			Method: http.MethodGet,
 			Path:   path,
@@ -774,7 +834,9 @@ func VerifyOpenAPISnapshots(t *testing.T, dir string, gv schema.GroupVersion, h 
 		}, &AnyResource{})
 
 		require.NotNil(t, rsp.Response)
-		require.Equal(t, 200, rsp.Response.StatusCode, path)
+		if rsp.Response.StatusCode != 200 {
+			require.Failf(t, "Not OK", "Code[%d] %s", rsp.Response.StatusCode, string(rsp.Body))
+		}
 
 		var prettyJSON bytes.Buffer
 		err := json.Indent(&prettyJSON, rsp.Body, "", "  ")
@@ -799,7 +861,7 @@ func VerifyOpenAPISnapshots(t *testing.T, dir string, gv schema.GroupVersion, h 
 		}
 
 		if write {
-			e2 := os.WriteFile(fpath, []byte(pretty), 0644)
+			e2 := os.WriteFile(fpath, []byte(pretty), 0o644)
 			if e2 != nil {
 				t.Errorf("error writing file: %s", e2.Error())
 			}
@@ -893,6 +955,50 @@ func (c *K8sTestHelper) DeleteServiceAccount(user User, orgID int64, saID int64)
 	}, &struct{}{})
 
 	require.Equal(c.t, http.StatusOK, resp.Response.StatusCode, "failed to delete service account, body: %s", string(resp.Body))
+}
+
+func (c *K8sTestHelper) DeleteFolder(user User, folderUID string) error {
+	c.t.Helper()
+
+	resp := DoRequest(c, RequestParams{
+		User:   user,
+		Method: http.MethodDelete,
+		Path:   fmt.Sprintf("/api/folders/%s", folderUID),
+	}, &struct{}{})
+
+	if resp.Response.StatusCode != http.StatusOK && resp.Response.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("failed to delete folder %s: status %d, body: %s", folderUID, resp.Response.StatusCode, string(resp.Body))
+	}
+	return nil
+}
+
+func (c *K8sTestHelper) DeleteUser(adminUser User, userID int64) error {
+	c.t.Helper()
+
+	resp := DoRequest(c, RequestParams{
+		User:   adminUser,
+		Method: http.MethodDelete,
+		Path:   fmt.Sprintf("/api/admin/users/%d", userID),
+	}, &struct{}{})
+
+	if resp.Response.StatusCode != http.StatusOK && resp.Response.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("failed to delete user %d: status %d, body: %s", userID, resp.Response.StatusCode, string(resp.Body))
+	}
+	return nil
+}
+
+func (c *K8sTestHelper) CleanupTestResources(folderUIDs []string, userIDs []int64) func() {
+	return func() {
+		c.t.Helper()
+		// Delete folders first (they may have dependencies)
+		for _, uid := range folderUIDs {
+			_ = c.DeleteFolder(c.Org1.Admin, uid)
+		}
+		// Then delete users
+		for _, id := range userIDs {
+			_ = c.DeleteUser(c.Org1.Admin, id)
+		}
+	}
 }
 
 // Ensures that the passed error is an APIStatus error and fails the test if it is not.

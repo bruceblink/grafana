@@ -165,11 +165,11 @@ export default function AlertmanagerConfig({ alertmanagerName, onDismiss, onSave
 
       {isLoadingSuccessful && (
         <div className={styles.content}>
-          <AutoSizer>
-            {({ height, width }) => (
+          <AutoSizer disableWidth>
+            {({ height }) => (
               <CodeEditor
                 language="json"
-                width={width}
+                width="100%"
                 height={height}
                 showLineNumbers={true}
                 monacoOptions={{
@@ -209,7 +209,7 @@ export default function AlertmanagerConfig({ alertmanagerName, onDismiss, onSave
           'Reset Alertmanager configuration'
         )}
         body={confirmationText}
-        confirmText="Yes, reset configuration"
+        confirmText={t('alerting.alertmanager-config.confirmText-yes-reset-configuration', 'Yes, reset configuration')}
         onConfirm={() => {
           onReset(alertmanagerName);
           setShowResetConfirmation(false);

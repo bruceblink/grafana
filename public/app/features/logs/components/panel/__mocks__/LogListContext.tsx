@@ -6,20 +6,25 @@ import { checkLogsError, checkLogsSampled } from 'app/features/logs/utils';
 import { LogListContextData, Props } from '../LogListContext';
 import { LogListModel } from '../processing';
 
+jest.mock('@grafana/assistant', () => {
+  return {
+    ...jest.requireActual('@grafana/assistant'),
+    useAssistant: jest.fn().mockReturnValue({
+      isAvailable: true,
+    }),
+  };
+});
+
 export const LogListContext = createContext<LogListContextData>({
   app: CoreApp.Unknown,
-  closeDetails: () => {},
   dedupStrategy: LogsDedupStrategy.none,
-  detailsDisplayed: () => false,
-  detailsWidth: 0,
   displayedFields: [],
   downloadLogs: () => {},
-  enableLogDetails: false,
   filterLevels: [],
   fontSize: 'default',
+  forceEscape: false,
   hasUnescapedContent: false,
   setDedupStrategy: () => {},
-  setDetailsWidth: () => {},
   setFilterLevels: () => {},
   setFontSize: () => {},
   setForceEscape: () => {},
@@ -30,13 +35,17 @@ export const LogListContext = createContext<LogListContextData>({
   setShowUniqueLabels: () => {},
   setSortOrder: () => {},
   setSyntaxHighlighting: () => {},
+  setTimestampResolution: () => {},
   setWrapLogMessage: () => {},
-  showDetails: [],
   showTime: true,
   sortOrder: LogsSortOrder.Ascending,
   syntaxHighlighting: true,
-  toggleDetails: () => {},
+  timestampResolution: 'ns',
   wrapLogMessage: false,
+  isAssistantAvailable: false,
+  openAssistantByLog: () => {},
+  controlsExpanded: false,
+  setControlsExpanded: () => {},
 });
 
 export const useLogListContextData = (key: keyof LogListContextData) => {
@@ -70,23 +79,24 @@ export const defaultValue: LogListContextData = {
   setSortOrder: jest.fn(),
   setPrettifyJSON: jest.fn(),
   setSyntaxHighlighting: jest.fn(),
+  setTimestampResolution: jest.fn(),
   setWrapLogMessage: jest.fn(),
-  closeDetails: jest.fn(),
-  detailsDisplayed: jest.fn(),
-  detailsWidth: 300,
   downloadLogs: jest.fn(),
-  enableLogDetails: false,
   filterLevels: [],
   fontSize: 'default',
-  setDetailsWidth: jest.fn(),
-  showDetails: [],
-  toggleDetails: jest.fn(),
+  forceEscape: false,
+  hasUnescapedContent: false,
   app: CoreApp.Explore,
   dedupStrategy: LogsDedupStrategy.exact,
   displayedFields: [],
   showTime: false,
   sortOrder: LogsSortOrder.Ascending,
   wrapLogMessage: false,
+  isAssistantAvailable: false,
+  openAssistantByLog: jest.fn(),
+  timestampResolution: 'ns',
+  controlsExpanded: false,
+  setControlsExpanded: jest.fn(),
 };
 
 export const defaultProps: Props = {
@@ -94,7 +104,6 @@ export const defaultProps: Props = {
   containerElement: document.createElement('div'),
   dedupStrategy: LogsDedupStrategy.none,
   displayedFields: [],
-  enableLogDetails: false,
   filterLevels: [],
   fontSize: 'default',
   getRowContextQuery: jest.fn(),
@@ -109,6 +118,7 @@ export const defaultProps: Props = {
   showTime: true,
   sortOrder: LogsSortOrder.Descending,
   syntaxHighlighting: true,
+  timestampResolution: 'ms',
   wrapLogMessage: true,
 };
 
@@ -117,7 +127,6 @@ export const LogListContextProvider = ({
   children,
   dedupStrategy = LogsDedupStrategy.none,
   displayedFields = [],
-  enableLogDetails = false,
   filterLevels = [],
   getRowContextQuery = jest.fn(),
   logLineMenuCustomItems = undefined,
@@ -130,12 +139,12 @@ export const LogListContextProvider = ({
   onUnpinLine = jest.fn(),
   permalinkedLogId,
   pinnedLogs = [],
-  showDetails = [],
   showTime = true,
   sortOrder = LogsSortOrder.Descending,
   syntaxHighlighting = true,
+  timestampResolution = 'ms',
   wrapLogMessage = true,
-}: Partial<Props> & { showDetails?: LogListModel[] }) => {
+}: Partial<Props>) => {
   const hasLogsWithErrors = logs.some((log) => !!checkLogsError(log));
   const hasSampledLogs = logs.some((log) => !!checkLogsSampled(log));
 
@@ -147,7 +156,6 @@ export const LogListContextProvider = ({
         dedupStrategy,
         displayedFields,
         downloadLogs: jest.fn(),
-        enableLogDetails,
         hasLogsWithErrors,
         hasSampledLogs,
         filterLevels,
@@ -173,10 +181,10 @@ export const LogListContextProvider = ({
         setSortOrder: jest.fn(),
         setSyntaxHighlighting: jest.fn(),
         setWrapLogMessage: jest.fn(),
-        showDetails,
         showTime,
         sortOrder,
         syntaxHighlighting,
+        timestampResolution,
         wrapLogMessage,
       }}
     >

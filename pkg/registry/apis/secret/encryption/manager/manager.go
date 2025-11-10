@@ -1,10 +1,8 @@
 package manager
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"strconv"
@@ -20,29 +18,21 @@ import (
 	"github.com/grafana/grafana/pkg/registry/apis/secret/contracts"
 	"github.com/grafana/grafana/pkg/registry/apis/secret/encryption"
 	"github.com/grafana/grafana/pkg/registry/apis/secret/encryption/cipher"
-	"github.com/grafana/grafana/pkg/registry/apis/secret/encryption/cipher/service"
-	"github.com/grafana/grafana/pkg/registry/apis/secret/encryption/kmsproviders"
-	"github.com/grafana/grafana/pkg/setting"
+	"github.com/grafana/grafana/pkg/registry/apis/secret/xkube"
 	"github.com/grafana/grafana/pkg/util"
-)
-
-const (
-	keyIdDelimiter = '#'
 )
 
 type EncryptionManager struct {
 	tracer     trace.Tracer
 	store      contracts.DataKeyStorage
-	enc        cipher.Cipher
-	cfg        *setting.Cfg
 	usageStats usagestats.Service
 
 	mtx sync.Mutex
 
-	pOnce     sync.Once
-	providers encryption.ProviderMap
-
-	currentProviderID encryption.ProviderID
+	// The cipher is used to encrypt and decrypt payloads with a data key.
+	cipher cipher.Cipher
+	// The providerConfig are used to encrypt and decrypt the data keys.
+	providerConfig encryption.ProviderConfig
 
 	log log.Logger
 }
@@ -51,33 +41,22 @@ type EncryptionManager struct {
 func ProvideEncryptionManager(
 	tracer trace.Tracer,
 	store contracts.DataKeyStorage,
-	cfg *setting.Cfg,
 	usageStats usagestats.Service,
-	thirdPartyKMS encryption.ProviderMap,
+	enc cipher.Cipher,
+	providerConfig encryption.ProviderConfig,
 ) (contracts.EncryptionManager, error) {
-	currentProviderID := encryption.ProviderID(cfg.SecretsManagement.EncryptionProvider)
-
-	enc, err := service.NewEncryptionService(tracer, usageStats, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create encryption service: %w", err)
+	currentProviderID := providerConfig.CurrentProvider
+	if _, ok := providerConfig.AvailableProviders[currentProviderID]; !ok {
+		return nil, fmt.Errorf("missing configuration for current encryption provider %s", currentProviderID)
 	}
 
 	s := &EncryptionManager{
-		tracer:            tracer,
-		store:             store,
-		cfg:               cfg,
-		usageStats:        usageStats,
-		enc:               enc,
-		currentProviderID: currentProviderID,
-		log:               log.New("encryption"),
-	}
-
-	if err := s.InitProviders(thirdPartyKMS); err != nil {
-		return nil, err
-	}
-
-	if _, ok := s.providers[currentProviderID]; !ok {
-		return nil, fmt.Errorf("missing configuration for current encryption provider %s", currentProviderID)
+		tracer:         tracer,
+		store:          store,
+		usageStats:     usageStats,
+		cipher:         enc,
+		log:            log.New("encryption"),
+		providerConfig: providerConfig,
 	}
 
 	s.registerUsageMetrics()
@@ -85,44 +64,20 @@ func ProvideEncryptionManager(
 	return s, nil
 }
 
-func (s *EncryptionManager) InitProviders(extraProviders encryption.ProviderMap) (err error) {
-	done := false
-	s.pOnce.Do(func() {
-		providers := kmsproviders.GetOSSKMSProviders(s.cfg, s.enc)
-
-		for id, p := range extraProviders {
-			if _, exists := s.providers[id]; exists {
-				err = fmt.Errorf("provider %s already registered", id)
-				return
-			}
-			providers[id] = p
-		}
-
-		s.providers = providers
-		done = true
-	})
-
-	if !done && err == nil {
-		err = fmt.Errorf("providers were already initialized, no action taken")
-	}
-
-	return
-}
-
 func (s *EncryptionManager) registerUsageMetrics() {
 	s.usageStats.RegisterMetricsFunc(func(ctx context.Context) (map[string]any, error) {
 		usageMetrics := make(map[string]any)
 
 		// Current provider
-		kind, err := s.currentProviderID.Kind()
+		kind, err := s.providerConfig.CurrentProvider.Kind()
 		if err != nil {
 			return nil, fmt.Errorf("encryptionManager.registerUsageMetrics: %w", err)
 		}
 		usageMetrics[fmt.Sprintf("stats.%s.encryption.current_provider.%s.count", encryption.UsageInsightsPrefix, kind)] = 1
 
 		// Count by kind
-		countByKind := make(map[string]int, len(s.providers))
-		for id := range s.providers {
+		countByKind := make(map[string]int, len(s.providerConfig.AvailableProviders))
+		for id := range s.providerConfig.AvailableProviders {
 			kind, err := id.Kind()
 			if err != nil {
 				return nil, fmt.Errorf("encryptionManager.registerUsageMetrics: %w", err)
@@ -139,12 +94,9 @@ func (s *EncryptionManager) registerUsageMetrics() {
 	})
 }
 
-// TODO: Why do we need to use a global variable for this?
-var b64 = base64.RawStdEncoding
-
-func (s *EncryptionManager) Encrypt(ctx context.Context, namespace string, payload []byte) ([]byte, error) {
+func (s *EncryptionManager) Encrypt(ctx context.Context, namespace xkube.Namespace, payload []byte) (contracts.EncryptedPayload, error) {
 	ctx, span := s.tracer.Start(ctx, "EnvelopeEncryptionManager.Encrypt", trace.WithAttributes(
-		attribute.String("namespace", namespace),
+		attribute.String("namespace", namespace.String()),
 	))
 	defer span.End()
 
@@ -161,41 +113,37 @@ func (s *EncryptionManager) Encrypt(ctx context.Context, namespace string, paylo
 		}
 	}()
 
-	label := encryption.KeyLabel(s.currentProviderID)
+	label := encryption.KeyLabel(s.providerConfig.CurrentProvider)
 
 	var id string
 	var dataKey []byte
 	id, dataKey, err = s.currentDataKey(ctx, namespace, label)
 	if err != nil {
 		s.log.Error("Failed to get current data key", "error", err, "label", label)
-		return nil, err
+		return contracts.EncryptedPayload{}, err
 	}
 
 	var encrypted []byte
-	encrypted, err = s.enc.Encrypt(ctx, payload, string(dataKey))
+	encrypted, err = s.cipher.Encrypt(ctx, payload, string(dataKey))
 	if err != nil {
 		s.log.Error("Failed to encrypt secret", "error", err)
-		return nil, err
+		return contracts.EncryptedPayload{}, err
 	}
 
-	prefix := make([]byte, b64.EncodedLen(len(id))+2)
-	b64.Encode(prefix[1:], []byte(id))
-	prefix[0] = keyIdDelimiter
-	prefix[len(prefix)-1] = keyIdDelimiter
+	encryptedPayload := contracts.EncryptedPayload{
+		DataKeyID:     id,
+		EncryptedData: encrypted,
+	}
 
-	blob := make([]byte, len(prefix)+len(encrypted))
-	copy(blob, prefix)
-	copy(blob[len(prefix):], encrypted)
-
-	return blob, nil
+	return encryptedPayload, nil
 }
 
 // currentDataKey looks up for current data key in cache or database by name, and decrypts it.
 // If there's no current data key in cache nor in database it generates a new random data key,
 // and stores it into both the in-memory cache and database (encrypted by the encryption provider).
-func (s *EncryptionManager) currentDataKey(ctx context.Context, namespace string, label string) (string, []byte, error) {
+func (s *EncryptionManager) currentDataKey(ctx context.Context, namespace xkube.Namespace, label string) (string, []byte, error) {
 	ctx, span := s.tracer.Start(ctx, "EnvelopeEncryptionManager.CurrentDataKey", trace.WithAttributes(
-		attribute.String("namespace", namespace),
+		attribute.String("namespace", namespace.String()),
 		attribute.String("label", label),
 	))
 	defer span.End()
@@ -206,14 +154,14 @@ func (s *EncryptionManager) currentDataKey(ctx context.Context, namespace string
 	defer s.mtx.Unlock()
 
 	// We try to fetch the data key, either from cache or database
-	id, dataKey, err := s.dataKeyByLabel(ctx, namespace, label)
+	id, dataKey, err := s.dataKeyByLabel(ctx, namespace.String(), label)
 	if err != nil {
 		return "", nil, err
 	}
 
 	// If no existing data key was found, create a new one
 	if dataKey == nil {
-		id, dataKey, err = s.newDataKey(ctx, namespace, label)
+		id, dataKey, err = s.newDataKey(ctx, namespace.String(), label)
 		if err != nil {
 			return "", nil, err
 		}
@@ -235,7 +183,7 @@ func (s *EncryptionManager) dataKeyByLabel(ctx context.Context, namespace, label
 	}
 
 	// 2.1 Find the encryption provider.
-	provider, exists := s.providers[dataKey.Provider]
+	provider, exists := s.providerConfig.AvailableProviders[dataKey.Provider]
 	if !exists {
 		return "", nil, fmt.Errorf("could not find encryption provider '%s'", dataKey.Provider)
 	}
@@ -264,9 +212,9 @@ func (s *EncryptionManager) newDataKey(ctx context.Context, namespace string, la
 	}
 
 	// 2.1 Find the encryption provider.
-	provider, exists := s.providers[s.currentProviderID]
+	provider, exists := s.providerConfig.AvailableProviders[s.providerConfig.CurrentProvider]
 	if !exists {
-		return "", nil, fmt.Errorf("could not find encryption provider '%s'", s.currentProviderID)
+		return "", nil, fmt.Errorf("could not find encryption provider '%s'", s.providerConfig.CurrentProvider)
 	}
 
 	// 2.2 Encrypt the data key.
@@ -282,7 +230,7 @@ func (s *EncryptionManager) newDataKey(ctx context.Context, namespace string, la
 		Active:        true,
 		UID:           id,
 		Namespace:     namespace,
-		Provider:      s.currentProviderID,
+		Provider:      s.providerConfig.CurrentProvider,
 		EncryptedData: encrypted,
 		Label:         label,
 	}
@@ -304,9 +252,9 @@ func newRandomDataKey() ([]byte, error) {
 	return rawDataKey, nil
 }
 
-func (s *EncryptionManager) Decrypt(ctx context.Context, namespace string, payload []byte) ([]byte, error) {
+func (s *EncryptionManager) Decrypt(ctx context.Context, namespace xkube.Namespace, payload contracts.EncryptedPayload) ([]byte, error) {
 	ctx, span := s.tracer.Start(ctx, "EnvelopeEncryptionManager.Decrypt", trace.WithAttributes(
-		attribute.String("namespace", namespace),
+		attribute.String("namespace", namespace.String()),
 	))
 	defer span.End()
 
@@ -325,48 +273,26 @@ func (s *EncryptionManager) Decrypt(ctx context.Context, namespace string, paylo
 		}
 	}()
 
-	if len(payload) == 0 {
+	if len(payload.EncryptedData) == 0 {
 		err = fmt.Errorf("unable to decrypt empty payload")
 		return nil, err
 	}
 
-	payload = payload[1:]
-	endOfKey := bytes.Index(payload, []byte{keyIdDelimiter})
-	if endOfKey == -1 {
-		err = fmt.Errorf("could not find valid key id in encrypted payload")
-		return nil, err
-	}
-	b64Key := payload[:endOfKey]
-	payload = payload[endOfKey+1:]
-	keyId := make([]byte, b64.DecodedLen(len(b64Key)))
-	_, err = b64.Decode(keyId, b64Key)
-	if err != nil {
+	if payload.DataKeyID == "" {
+		err = fmt.Errorf("unable to decrypt empty data key id")
 		return nil, err
 	}
 
-	dataKey, err := s.dataKeyById(ctx, namespace, string(keyId))
+	dataKey, err := s.dataKeyById(ctx, namespace.String(), payload.DataKeyID)
 	if err != nil {
-		s.log.FromContext(ctx).Error("Failed to lookup data key by id", "id", string(keyId), "error", err)
+		s.log.FromContext(ctx).Error("Failed to lookup data key by id", "id", payload.DataKeyID, "error", err)
 		return nil, err
 	}
 
 	var decrypted []byte
-	decrypted, err = s.enc.Decrypt(ctx, payload, string(dataKey))
+	decrypted, err = s.cipher.Decrypt(ctx, payload.EncryptedData, string(dataKey))
 
 	return decrypted, err
-}
-
-func (s *EncryptionManager) GetDecryptedValue(ctx context.Context, namespace string, sjd map[string][]byte, key, fallback string) string {
-	if value, ok := sjd[key]; ok {
-		decryptedData, err := s.Decrypt(ctx, namespace, value)
-		if err != nil {
-			return fallback
-		}
-
-		return string(decryptedData)
-	}
-
-	return fallback
 }
 
 // dataKeyById looks up for data key in the database and returns it decrypted.
@@ -384,7 +310,7 @@ func (s *EncryptionManager) dataKeyById(ctx context.Context, namespace, id strin
 	}
 
 	// 2.1. Find the encryption provider.
-	provider, exists := s.providers[dataKey.Provider]
+	provider, exists := s.providerConfig.AvailableProviders[dataKey.Provider]
 	if !exists {
 		return nil, fmt.Errorf("could not find encryption provider '%s'", dataKey.Provider)
 	}
@@ -398,6 +324,6 @@ func (s *EncryptionManager) dataKeyById(ctx context.Context, namespace, id strin
 	return decrypted, nil
 }
 
-func (s *EncryptionManager) GetProviders() encryption.ProviderMap {
-	return s.providers
+func (s *EncryptionManager) GetProviders() encryption.ProviderConfig {
+	return s.providerConfig
 }

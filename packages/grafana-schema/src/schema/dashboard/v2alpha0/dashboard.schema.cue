@@ -409,6 +409,7 @@ QueryOptionsSpec: {
   interval?: string
   cacheTimeout?: string
   hideTimeOverride?: bool
+  timeCompare?: string
 }
 
 DataQueryKind: {
@@ -934,7 +935,7 @@ ConditionalRenderingVariableKind: {
 
 ConditionalRenderingVariableSpec: {
   variable: string
-  operator: "equals" | "notEquals"
+  operator: "equals" | "notEquals" | "matches" | "notMatches"
   value: string
 }
 

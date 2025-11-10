@@ -14,7 +14,7 @@ import { Icon } from '../Icon/Icon';
 
 export interface ButtonCascaderProps {
   options: CascaderOption[];
-  children?: string;
+  children: string;
   icon?: IconName;
   disabled?: boolean;
   value?: string[];
@@ -24,10 +24,13 @@ export interface ButtonCascaderProps {
   onPopupVisibleChange?: (visible: boolean) => void;
   className?: string;
   variant?: ButtonProps['variant'];
-  buttonProps?: ButtonProps;
+  buttonProps?: Omit<ButtonProps, 'children'>;
   hideDownIcon?: boolean;
 }
 
+/**
+ * https://developers.grafana.com/ui/latest/index.html?path=/docs/inputs-buttoncascader--docs
+ */
 export const ButtonCascader = (props: ButtonCascaderProps) => {
   const { onChange, className, loadData, icon, buttonProps, hideDownIcon, variant, disabled, ...rest } = props;
   const styles = useStyles2(getStyles);

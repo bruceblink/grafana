@@ -32,9 +32,12 @@ import (
 // NOTE: this should not be added to the public API docs, and is useful for a transition
 // towards a fully static index.html -- this will likely be replaced with multiple calls
 func (hs *HTTPServer) GetBootdata(c *contextmodel.ReqContext) {
+	c, span := hs.injectSpan(c, "api.GetBootdata")
+	defer span.End()
+
 	data, err := hs.setIndexViewData(c)
 	if err != nil {
-		c.Handle(hs.Cfg, http.StatusInternalServerError, "Failed to get settings", err)
+		c.JsonApiErr(http.StatusInternalServerError, "Failed to get settings", err)
 		return
 	}
 	c.JSON(http.StatusOK, data)
@@ -250,6 +253,8 @@ func (hs *HTTPServer) getFrontendSettings(c *contextmodel.ReqContext) (*dtos.Fro
 		QuickRanges:                      hs.Cfg.QuickRanges,
 		SecureSocksDSProxyEnabled:        hs.Cfg.SecureSocksDSProxy.Enabled && hs.Cfg.SecureSocksDSProxy.ShowUI,
 		EnableFrontendSandboxForPlugins:  hs.Cfg.EnableFrontendSandboxForPlugins,
+		PluginRestrictedAPIsAllowList:    hs.Cfg.PluginRestrictedAPIsAllowList,
+		PluginRestrictedAPIsBlockList:    hs.Cfg.PluginRestrictedAPIsBlockList,
 		PublicDashboardAccessToken:       c.PublicDashboardAccessToken,
 		PublicDashboardsEnabled:          hs.Cfg.PublicDashboardsEnabled,
 		CloudMigrationIsTarget:           isCloudMigrationTarget,
@@ -285,26 +290,27 @@ func (hs *HTTPServer) getFrontendSettings(c *contextmodel.ReqContext) (*dtos.Fro
 			EnabledFeatures: hs.License.EnabledFeatures(),
 		},
 
-		FeatureToggles:                   featureToggles,
-		AnonymousEnabled:                 hs.Cfg.Anonymous.Enabled,
-		AnonymousDeviceLimit:             hs.Cfg.Anonymous.DeviceLimit,
-		RendererAvailable:                hs.RenderService.IsAvailable(c.Req.Context()),
-		RendererVersion:                  hs.RenderService.Version(),
-		RendererDefaultImageWidth:        hs.Cfg.RendererDefaultImageWidth,
-		RendererDefaultImageHeight:       hs.Cfg.RendererDefaultImageHeight,
-		RendererDefaultImageScale:        hs.Cfg.RendererDefaultImageScale,
-		Http2Enabled:                     hs.Cfg.Protocol == setting.HTTP2Scheme,
-		GrafanaJavascriptAgent:           hs.Cfg.GrafanaJavascriptAgent,
-		PluginCatalogURL:                 hs.Cfg.PluginCatalogURL,
-		PluginAdminEnabled:               hs.Cfg.PluginAdminEnabled,
-		PluginAdminExternalManageEnabled: hs.Cfg.PluginAdminEnabled && hs.Cfg.PluginAdminExternalManageEnabled,
-		PluginCatalogHiddenPlugins:       hs.Cfg.PluginCatalogHiddenPlugins,
-		PluginCatalogManagedPlugins:      hs.managedPluginsService.ManagedPlugins(c.Req.Context()),
-		PluginCatalogPreinstalledPlugins: append(hs.Cfg.PreinstallPluginsAsync, hs.Cfg.PreinstallPluginsSync...),
-		ExpressionsEnabled:               hs.Cfg.ExpressionsEnabled,
-		AwsAllowedAuthProviders:          hs.Cfg.AWSAllowedAuthProviders,
-		AwsAssumeRoleEnabled:             hs.Cfg.AWSAssumeRoleEnabled,
-		SupportBundlesEnabled:            isSupportBundlesEnabled(hs),
+		FeatureToggles:                      featureToggles,
+		AnonymousEnabled:                    hs.Cfg.Anonymous.Enabled,
+		AnonymousDeviceLimit:                hs.Cfg.Anonymous.DeviceLimit,
+		RendererAvailable:                   hs.RenderService.IsAvailable(c.Req.Context()),
+		RendererVersion:                     hs.RenderService.Version(),
+		RendererDefaultImageWidth:           hs.Cfg.RendererDefaultImageWidth,
+		RendererDefaultImageHeight:          hs.Cfg.RendererDefaultImageHeight,
+		RendererDefaultImageScale:           hs.Cfg.RendererDefaultImageScale,
+		Http2Enabled:                        hs.Cfg.Protocol == setting.HTTP2Scheme,
+		GrafanaJavascriptAgent:              hs.Cfg.GrafanaJavascriptAgent,
+		PluginCatalogURL:                    hs.Cfg.PluginCatalogURL,
+		PluginAdminEnabled:                  hs.Cfg.PluginAdminEnabled,
+		PluginAdminExternalManageEnabled:    hs.Cfg.PluginAdminEnabled && hs.Cfg.PluginAdminExternalManageEnabled,
+		PluginCatalogHiddenPlugins:          hs.Cfg.PluginCatalogHiddenPlugins,
+		PluginCatalogManagedPlugins:         hs.managedPluginsService.ManagedPlugins(c.Req.Context()),
+		PluginCatalogPreinstalledPlugins:    append(hs.Cfg.PreinstallPluginsAsync, hs.Cfg.PreinstallPluginsSync...),
+		PluginCatalogPreinstalledAutoUpdate: hs.Cfg.PreinstallAutoUpdate,
+		ExpressionsEnabled:                  hs.Cfg.ExpressionsEnabled,
+		AwsAllowedAuthProviders:             hs.Cfg.AWSAllowedAuthProviders,
+		AwsAssumeRoleEnabled:                hs.Cfg.AWSAssumeRoleEnabled,
+		SupportBundlesEnabled:               isSupportBundlesEnabled(hs),
 
 		Azure: dtos.FrontendSettingsAzureDTO{
 			Cloud:                                  hs.Cfg.Azure.Cloud,
@@ -317,7 +323,8 @@ func (hs *HTTPServer) getFrontendSettings(c *contextmodel.ReqContext) (*dtos.Fro
 		},
 
 		Caching: dtos.FrontendSettingsCachingDTO{
-			Enabled: hs.Cfg.SectionWithEnvOverrides("caching").Key("enabled").MustBool(true),
+			Enabled:           hs.Cfg.SectionWithEnvOverrides("caching").Key("enabled").MustBool(true),
+			CleanCacheEnabled: hs.Cfg.SectionWithEnvOverrides("caching").Key("clean_cache_enabled").MustBool(true),
 		},
 		RecordedQueries: dtos.FrontendSettingsRecordedQueriesDTO{
 			Enabled: hs.Cfg.SectionWithEnvOverrides("recorded_queries").Key("enabled").MustBool(true),
@@ -345,9 +352,22 @@ func (hs *HTTPServer) getFrontendSettings(c *contextmodel.ReqContext) (*dtos.Fro
 			MaxIdleConns:    hs.Cfg.SqlDatasourceMaxIdleConnsDefault,
 			ConnMaxLifetime: hs.Cfg.SqlDatasourceMaxConnLifetimeDefault,
 		},
+		OpenFeatureContext: hs.Cfg.OpenFeature.ContextAttrs,
 	}
 
 	if hs.Cfg.UnifiedAlerting.StateHistory.Enabled {
+		frontendSettings.UnifiedAlerting.StateHistory = &dtos.FrontendSettingsUnifiedAlertingStateHistoryDTO{
+			Backend: hs.Cfg.UnifiedAlerting.StateHistory.Backend,
+			Primary: hs.Cfg.UnifiedAlerting.StateHistory.MultiPrimary,
+		}
+		if hs.Cfg.UnifiedAlerting.StateHistory.PrometheusTargetDatasourceUID != "" {
+			frontendSettings.UnifiedAlerting.StateHistory.PrometheusTargetDatasourceUID = hs.Cfg.UnifiedAlerting.StateHistory.PrometheusTargetDatasourceUID
+		}
+		if hs.Cfg.UnifiedAlerting.StateHistory.PrometheusMetricName != "" {
+			frontendSettings.UnifiedAlerting.StateHistory.PrometheusMetricName = hs.Cfg.UnifiedAlerting.StateHistory.PrometheusMetricName
+		}
+
+		// Populate deprecated fields for backward compatibility
 		frontendSettings.UnifiedAlerting.AlertStateHistoryBackend = hs.Cfg.UnifiedAlerting.StateHistory.Backend
 		frontendSettings.UnifiedAlerting.AlertStateHistoryPrimary = hs.Cfg.UnifiedAlerting.StateHistory.MultiPrimary
 	}

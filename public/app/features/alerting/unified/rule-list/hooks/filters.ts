@@ -8,8 +8,10 @@ import { RulesFilter } from '../../search/rulesSearchParser';
 import { labelsMatchMatchers } from '../../utils/alertmanager';
 import { Annotation } from '../../utils/constants';
 import { getDatasourceAPIUid } from '../../utils/datasource';
+import { fuzzyMatches } from '../../utils/fuzzySearch';
 import { parseMatcher } from '../../utils/matchers';
 import { isPluginProvidedRule, prometheusRuleType } from '../../utils/rules';
+import { normalizeHealth } from '../components/util';
 
 /**
  * @returns True if the group matches the filter, false otherwise. Keeps rules intact
@@ -21,13 +23,11 @@ export function groupFilter(
   const { name, file } = group;
   const { namespace, groupName } = filterState;
 
-  // Add fuzzy search for namespace
-  if (namespace && !file.toLocaleLowerCase().includes(namespace.toLocaleLowerCase())) {
+  if (namespace && !fuzzyMatches(file, namespace)) {
     return false;
   }
 
-  // Add fuzzy search for group name
-  if (groupName && !name.toLocaleLowerCase().includes(groupName.toLocaleLowerCase())) {
+  if (groupName && !fuzzyMatches(name, groupName)) {
     return false;
   }
 
@@ -40,19 +40,17 @@ export function groupFilter(
 export function ruleFilter(rule: PromRuleDTO, filterState: RulesFilter) {
   const { name, labels = {}, health, type } = rule;
 
-  const nameLower = name.toLowerCase();
+  if (filterState.freeFormWords.length > 0) {
+    const nameMatches = fuzzyMatches(name, filterState.freeFormWords.join(' '));
+    if (!nameMatches) {
+      return false;
+    }
+  }
 
-  // Free form words filter (matches if any word is part of the rule name)
-  if (filterState.freeFormWords.length > 0 && !filterState.freeFormWords.some((word) => nameLower.includes(word))) {
+  if (filterState.ruleName && !fuzzyMatches(name, filterState.ruleName)) {
     return false;
   }
 
-  // Rule name filter (exact match)
-  if (filterState.ruleName && !nameLower.includes(filterState.ruleName)) {
-    return false;
-  }
-
-  // Labels filter
   if (filterState.labels.length > 0) {
     const matchers = compact(filterState.labels.map(looseParseMatcher));
     const doRuleLabelsMatchQuery = matchers.length > 0 && labelsMatchMatchers(labels, matchers);
@@ -69,12 +67,10 @@ export function ruleFilter(rule: PromRuleDTO, filterState: RulesFilter) {
     }
   }
 
-  // Rule type filter
   if (filterState.ruleType && type !== filterState.ruleType) {
     return false;
   }
 
-  // Rule state filter (for alerting rules only)
   if (filterState.ruleState) {
     if (!prometheusRuleType.alertingRule(rule)) {
       return false;
@@ -84,8 +80,7 @@ export function ruleFilter(rule: PromRuleDTO, filterState: RulesFilter) {
     }
   }
 
-  // Rule health filter
-  if (filterState.ruleHealth && health !== filterState.ruleHealth) {
+  if (filterState.ruleHealth && normalizeHealth(health) !== filterState.ruleHealth) {
     return false;
   }
 
@@ -103,7 +98,6 @@ export function ruleFilter(rule: PromRuleDTO, filterState: RulesFilter) {
     }
   }
 
-  // Dashboard UID filter
   if (filterState.dashboardUid) {
     if (!prometheusRuleType.alertingRule(rule)) {
       return false;

@@ -13,16 +13,14 @@
 // limitations under the License.
 
 import { css } from '@emotion/css';
-import classNames from 'classnames';
-import { PureComponent } from 'react';
+import React from 'react';
 
 import { CoreApp, GrafanaTheme2, LinkModel, TimeRange, TraceLog } from '@grafana/data';
 import { TraceToProfilesOptions } from '@grafana/o11y-ds-frontend';
 import { TimeZone } from '@grafana/schema';
-import { Button, clearButtonStyles, stylesFactory, withTheme2 } from '@grafana/ui';
+import { stylesFactory, withTheme2 } from '@grafana/ui';
 
-import { autoColor } from '../Theme';
-import { SpanLinkFunc } from '../types';
+import { SpanLinkFunc } from '../types/links';
 import { TraceSpan, TraceSpanReference } from '../types/trace';
 
 import SpanDetail, { TraceFlameGraphs } from './SpanDetail';
@@ -64,9 +62,21 @@ const getStyles = stylesFactory((theme: GrafanaTheme2) => {
     }),
     infoWrapper: css({
       label: 'infoWrapper',
-      border: `1px solid ${autoColor(theme, '#d3d3d3')}`,
-      borderTop: '3px solid',
       padding: '0.75rem',
+    }),
+    cell: css({
+      label: 'cell',
+      display: 'flex !important',
+      width: '100% !important',
+    }),
+    indentSpacer: css({
+      label: 'indentSpacer',
+      flex: 'none',
+    }),
+    detailWrapper: css({
+      label: 'detailWrapper',
+      flex: '1',
+      minWidth: 0,
     }),
   };
 });
@@ -107,50 +117,47 @@ export type SpanDetailRowProps = {
   app: CoreApp;
 };
 
-export class UnthemedSpanDetailRow extends PureComponent<SpanDetailRowProps> {
-  _detailToggle = () => {
-    this.props.onDetailToggled(this.props.span.spanID);
-  };
+const UnthemedSpanDetailRow = React.memo<SpanDetailRowProps>((props) => {
+  const {
+    color,
+    detailState,
+    logItemToggle,
+    logsToggle,
+    processToggle,
+    referenceItemToggle,
+    referencesToggle,
+    warningsToggle,
+    stackTracesToggle,
+    span,
+    traceToProfilesOptions,
+    timeZone,
+    tagsToggle,
+    traceStartTime,
+    traceDuration,
+    traceName,
+    theme,
+    createSpanLink,
+    focusedSpanId,
+    createFocusSpanLink,
+    datasourceType,
+    datasourceUid,
+    traceFlameGraphs,
+    setTraceFlameGraphs,
+    setRedrawListView,
+    timeRange,
+    app,
+    hoverIndentGuideIds,
+    addHoverIndentGuideId,
+    removeHoverIndentGuideId,
+    visibleSpanIds,
+  } = props;
 
-  render() {
-    const {
-      color,
-      columnDivision,
-      detailState,
-      logItemToggle,
-      logsToggle,
-      processToggle,
-      referenceItemToggle,
-      referencesToggle,
-      warningsToggle,
-      stackTracesToggle,
-      span,
-      traceToProfilesOptions,
-      timeZone,
-      tagsToggle,
-      traceStartTime,
-      traceDuration,
-      traceName,
-      hoverIndentGuideIds,
-      addHoverIndentGuideId,
-      removeHoverIndentGuideId,
-      theme,
-      createSpanLink,
-      focusedSpanId,
-      createFocusSpanLink,
-      datasourceType,
-      datasourceUid,
-      visibleSpanIds,
-      traceFlameGraphs,
-      setTraceFlameGraphs,
-      setRedrawListView,
-      timeRange,
-      app,
-    } = this.props;
-    const styles = getStyles(theme);
-    return (
-      <TimelineRow>
-        <TimelineRow.Cell width={columnDivision} style={{ overflow: 'hidden' }}>
+  const styles = getStyles(theme);
+
+  return (
+    <TimelineRow>
+      <TimelineRow.Cell width={1} className={styles.cell}>
+        <div className={styles.indentSpacer}>
           <SpanTreeOffset
             span={span}
             showChildrenIcon={false}
@@ -159,17 +166,11 @@ export class UnthemedSpanDetailRow extends PureComponent<SpanDetailRowProps> {
             removeHoverIndentGuideId={removeHoverIndentGuideId}
             visibleSpanIds={visibleSpanIds}
           />
-          <Button
-            fill="text"
-            onClick={this._detailToggle}
-            className={classNames(styles.expandedAccent, clearButtonStyles(theme))}
-            style={{ borderColor: color }}
-            data-testid="detail-row-expanded-accent"
-          ></Button>
-        </TimelineRow.Cell>
-        <TimelineRow.Cell width={1 - columnDivision}>
+        </div>
+        <div className={styles.detailWrapper}>
           <div className={styles.infoWrapper} style={{ borderTopColor: color }}>
             <SpanDetail
+              color={color}
               detailState={detailState}
               logItemToggle={logItemToggle}
               logsToggle={logsToggle}
@@ -197,10 +198,12 @@ export class UnthemedSpanDetailRow extends PureComponent<SpanDetailRowProps> {
               app={app}
             />
           </div>
-        </TimelineRow.Cell>
-      </TimelineRow>
-    );
-  }
-}
+        </div>
+      </TimelineRow.Cell>
+    </TimelineRow>
+  );
+});
+
+UnthemedSpanDetailRow.displayName = 'UnthemedSpanDetailRow';
 
 export default withTheme2(UnthemedSpanDetailRow);

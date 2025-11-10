@@ -49,10 +49,12 @@ const TagListComponent = memo(
             </li>
           ))}
           {displayMax && displayMax > 0 && numTags - displayMax > 0 && (
-            <span className={styles.moreTagsLabel}>
-              {'+ '}
-              {numTags - displayMax}
-            </span>
+            <li className={styles.li}>
+              <span className={styles.moreTagsLabel}>
+                {'+ '}
+                {numTags - displayMax}
+              </span>
+            </li>
           )}
         </ul>
       );
@@ -71,6 +73,11 @@ const TagListSkeleton: SkeletonComponent = ({ rootProps }) => {
   );
 };
 
+/**
+ * List of tags with predefined margins and positioning.
+ *
+ * https://developers.grafana.com/ui/latest/index.html?path=/docs/information-taglist--docs
+ */
 export const TagList = attachSkeleton(TagListComponent, TagListSkeleton);
 
 const getSkeletonStyles = (theme: GrafanaTheme2) => ({

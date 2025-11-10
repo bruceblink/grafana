@@ -14,13 +14,24 @@ labels:
     - enterprise
     - oss
 title: Folder HTTP API
+refs:
+  apis:
+    - pattern: /docs/grafana/
+      destination: /docs/grafana/<GRAFANA_VERSION>/developers/http_api/apis/
+    - pattern: /docs/grafana-cloud/
+      destination: /docs/grafana-cloud/developer-resources/api-reference/http-api/apis/
+  alerting:
+    - pattern: /docs/grafana/
+      destination: /docs/grafana/<GRAFANA_VERSION>/alerting
+    - pattern: /docs/grafana-cloud/
+      destination: /docs/grafana-cloud/alerting-and-irm/alerting/
 ---
 
 # New Folders APIs
 
 > If you are running Grafana Enterprise, for some endpoints you'll need to have specific permissions. Refer to [Role-based access control permissions](/docs/grafana/latest/administration/roles-and-permissions/access-control/custom-role-actions-scopes/) for more information.
 
-> To view more about the new api structure, refer to [API overview]({{< ref "apis" >}}).
+> To view more about the new api structure, refer to [API overview](ref:apis).
 
 ### Get all folders
 
@@ -28,7 +39,12 @@ title: Folder HTTP API
 
 Returns all folders that the authenticated user has permission to view within the given organization. Use the `limit` query parameter to control the maximum number of dashboards returned. To retrieve additional dashboards, utilize the `continue` token provided in the response to fetch the next page.
 
-- namespace: to read more about the namespace to use, see the [API overview]({{< ref "apis" >}}).
+- namespace: to read more about the namespace to use, see the [API overview](ref:apis).
+
+**Query parameters**:
+
+- **`limit`** (optional): Maximum number of folders to return
+- **`continue`** (optional): Continue token from a previous response to fetch the next page
 
 **Required permissions**
 
@@ -56,7 +72,7 @@ Content-Type: application/json
   "kind": "FolderList",
   "apiVersion": "folder.grafana.app/v1beta1",
   "metadata": {
-    "continue": "org:1/start:1158/folder:"
+    "continue": "eyJvIjoxNTIsInYiOjE3NjE3MDQyMjQyMDcxODksInMiOmZhbHNlfQ=="
   },
   "items": [
     {
@@ -82,6 +98,51 @@ Content-Type: application/json
 }
 ```
 
+The `metadata.continue` field contains a token to fetch the next page.
+
+**Example subsequent request using continue token**:
+
+```http
+GET /apis/folder.grafana.app/v1beta1/namespaces/default/folders?limit=1&continue=eyJvIjoxNTIsInYiOjE3NjE3MDQyMjQyMDcxODksInMiOmZhbHNlfQ== HTTP/1.1
+Accept: application/json
+Content-Type: application/json
+Authorization: Bearer eyJrIjoiT0tTcG1pUlY2RnVKZTFVaDFsNFZXdE9ZWmNrMkZYbk
+```
+
+**Example subsequent response**:
+
+```http
+HTTP/1.1 200
+Content-Type: application/json
+{
+  "kind": "FolderList",
+  "apiVersion": "folder.grafana.app/v1beta1",
+  "items": [
+    {
+      "kind": "Folder",
+      "apiVersion": "folder.grafana.app/v1beta1",
+      "metadata": {
+        "name": "bef30vrzxs3y8e",
+        "namespace": "default",
+        "uid": "YCtv1FXDsJmTYQoTgcPnfuwZhDZge3uMpXOefaOHjb5Y",
+        "resourceVersion": "1741343687000",
+        "creationTimestamp": "2025-03-07T10:35:47Z",
+        "annotations": {
+          "grafana.app/createdBy": "service-account:cef2t2rfm73lsb",
+          "grafana.app/updatedBy": "service-account:cef2t2rfm73lsb",
+          "grafana.app/updatedTimestamp": "2025-03-07T10:35:47Z"
+        }
+      },
+      "spec": {
+        "title": "another folder"
+      }
+    }
+  ]
+}
+```
+
+Continue making requests with the updated `continue` token until you receive a response without a `continue` field in the metadata, indicating you've reached the last page.
+
 Status Codes:
 
 - **200** – OK
@@ -94,7 +155,7 @@ Status Codes:
 
 Will return the folder given the folder uid.
 
-- namespace: to read more about the namespace to use, see the [API overview]({{< ref "apis" >}}).
+- namespace: to read more about the namespace to use, see the [API overview](ref:apis).
 - uid: the unique identifier of the folder to update. this will be the _name_ in the folder response
 
 **Required permissions**
@@ -156,7 +217,7 @@ Status Codes:
 
 Creates a new folder.
 
-- namespace: to read more about the namespace to use, see the [API overview]({{< ref "apis" >}}).
+- namespace: to read more about the namespace to use, see the [API overview](ref:apis).
 
 **Required permissions**
 
@@ -238,7 +299,7 @@ Status Codes:
 
 Updates an existing folder identified by uid.
 
-- namespace: to read more about the namespace to use, see the [API overview]({{< ref "apis" >}}).
+- namespace: to read more about the namespace to use, see the [API overview](ref:apis).
 - uid: the unique identifier of the folder to update. this will be the _name_ in the folder response
 
 **Required permissions**
@@ -328,9 +389,9 @@ Content-Length: 97
 
 Deletes an existing folder identified by UID along with all dashboards (and their alerts) stored in the folder. This operation cannot be reverted.
 
-If [Grafana Alerting]({{< relref "/docs/grafana/latest/alerting" >}}) is enabled, you can set an optional query parameter `forceDeleteRules=false` so that requests will fail with 400 (Bad Request) error if the folder contains any Grafana alerts. However, if this parameter is set to `true` then it will delete any Grafana alerts under this folder.
+If [Grafana Alerting](ref:alerting) is enabled, you can set an optional query parameter `forceDeleteRules=false` so that requests will fail with 400 (Bad Request) error if the folder contains any Grafana alerts. However, if this parameter is set to `true` then it will delete any Grafana alerts under this folder.
 
-- namespace: to read more about the namespace to use, see the [API overview]({{< ref "apis" >}}).
+- namespace: to read more about the namespace to use, see the [API overview](ref:apis).
 - uid: the unique identifier of the folder to delete. this will be the _name_ in the folder response
 
 **Required permissions**

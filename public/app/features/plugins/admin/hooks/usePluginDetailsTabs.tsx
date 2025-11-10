@@ -5,7 +5,7 @@ import { GrafanaPlugin, NavModelItem, PluginIncludeType, PluginType } from '@gra
 import { t } from '@grafana/i18n';
 import { config } from '@grafana/runtime';
 import { contextSrv } from 'app/core/core';
-import { AccessControlAction } from 'app/types';
+import { AccessControlAction } from 'app/types/accessControl';
 
 import { usePluginConfig } from '../hooks/usePluginConfig';
 import { CatalogPlugin, PluginTabIds, PluginTabLabels } from '../types';
@@ -74,7 +74,7 @@ export const usePluginDetailsTabs = (
       });
     }
 
-    if (isPublished && isNarrowScreen && config.featureToggles.pluginsDetailsRightPanel) {
+    if (isPublished && isNarrowScreen) {
       navModelChildren.push({
         text: PluginTabLabels.PLUGINDETAILS,
         id: PluginTabIds.PLUGINDETAILS,
@@ -85,7 +85,8 @@ export const usePluginDetailsTabs = (
     }
 
     // Not extending the tabs with the config pages if the plugin is not installed
-    if (!pluginConfig) {
+    // also wait if the plugin config is still loading to avoid showing default tabs prematurely
+    if (!pluginConfig || loading) {
       return navModelChildren;
     }
 
@@ -151,7 +152,7 @@ export const usePluginDetailsTabs = (
     }
 
     return navModelChildren;
-  }, [plugin, pluginConfig, pathname, isPublished, currentPageId, isNarrowScreen]);
+  }, [plugin, pluginConfig, pathname, isPublished, currentPageId, isNarrowScreen, loading]);
 
   const navModel: NavModelItem = {
     text: plugin?.name ?? '',

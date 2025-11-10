@@ -5,6 +5,7 @@ import { CoreApp, createTheme, LogsDedupStrategy, LogsSortOrder } from '@grafana
 
 import { createLogLine } from '../mocks/logRow';
 
+import { LogDetailsContextProvider } from './LogDetailsContext';
 import { getStyles } from './LogLine';
 import { LogLineMenu, LogLineMenuCustomItem } from './LogLineMenu';
 import { LogListContextProvider } from './LogListContext';
@@ -12,6 +13,19 @@ import { defaultProps, defaultValue } from './__mocks__/LogListContext';
 import { LogListModel } from './processing';
 
 jest.mock('./LogListContext');
+
+jest.mock('@grafana/assistant', () => ({
+  ...jest.requireActual('@grafana/assistant'),
+  useAssistant: jest.fn().mockReturnValue({
+    isAvailable: true,
+    openAssistant: jest.fn(),
+  }),
+}));
+
+jest.mock('@grafana/runtime', () => ({
+  ...jest.requireActual('@grafana/runtime'),
+  isAssistantAvailable: true,
+}));
 
 const theme = createTheme();
 const styles = getStyles(theme);
@@ -145,8 +159,10 @@ describe('LogLineMenu', () => {
 
     test('Allows to open log details', async () => {
       render(
-        <LogListContextProvider {...contextProps} enableLogDetails={true}>
-          <LogLineMenu log={log} styles={styles} />
+        <LogListContextProvider {...contextProps}>
+          <LogDetailsContextProvider enableLogDetails logs={contextProps.logs} showControls>
+            <LogLineMenu log={log} styles={styles} />
+          </LogDetailsContextProvider>
         </LogListContextProvider>
       );
       await userEvent.click(screen.getByLabelText('Log menu'));
@@ -155,8 +171,10 @@ describe('LogLineMenu', () => {
 
     test('Does not show log details option when disabled', async () => {
       render(
-        <LogListContextProvider {...contextProps} enableLogDetails={false}>
-          <LogLineMenu log={log} styles={styles} />
+        <LogListContextProvider {...contextProps}>
+          <LogDetailsContextProvider logs={contextProps.logs} showControls enableLogDetails={false}>
+            <LogLineMenu log={log} styles={styles} />
+          </LogDetailsContextProvider>
         </LogListContextProvider>
       );
       await userEvent.click(screen.getByLabelText('Log menu'));

@@ -3,6 +3,7 @@ import { ComponentClass, ComponentType } from 'react';
 
 import { FieldConfigOptionsRegistry } from '../field/FieldConfigOptionsRegistry';
 import { StandardEditorContext } from '../field/standardFieldConfigEditorRegistry';
+import { PanelModel } from '../types/dashboard';
 import { FieldConfigProperty, FieldConfigSource } from '../types/fieldOverrides';
 import {
   PanelPluginMeta,
@@ -113,18 +114,13 @@ export class PanelPlugin<
   panel: ComponentType<PanelProps<TOptions>> | null;
   editor?: ComponentClass<PanelEditorProps<TOptions>>;
   onPanelMigration?: PanelMigrationHandler<TOptions>;
-  shouldMigrate?: (panel: ComponentType<PanelProps<TOptions>> | null) => boolean;
+  shouldMigrate?: (panel: PanelModel) => boolean;
   onPanelTypeChanged?: PanelTypeChangedHandler<TOptions>;
   noPadding?: boolean;
   dataSupport: PanelPluginDataSupport = {
     annotations: false,
     alertStates: false,
   };
-
-  /**
-   * Legacy angular ctrl. If this exists it will be used instead of the panel
-   */
-  angularPanelCtrl?: any;
 
   constructor(panel: ComponentType<PanelProps<TOptions>> | null) {
     super();
@@ -208,10 +204,7 @@ export class PanelPlugin<
    *
    * This is a good place to support any changes to the options model
    */
-  setMigrationHandler(
-    handler: PanelMigrationHandler<TOptions>,
-    shouldMigrate?: (panel: ComponentType<PanelProps<TOptions>> | null) => boolean
-  ) {
+  setMigrationHandler(handler: PanelMigrationHandler<TOptions>, shouldMigrate?: (panel: PanelModel) => boolean) {
     this.onPanelMigration = handler;
     this.shouldMigrate = shouldMigrate;
     return this;

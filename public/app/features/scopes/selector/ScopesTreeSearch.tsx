@@ -10,11 +10,25 @@ import { TreeNode } from './types';
 
 export interface ScopesTreeSearchProps {
   anyChildExpanded: boolean;
+  searchArea: string;
   treeNode: TreeNode;
-  onNodeUpdate: (scopeNodeId: string, expanded: boolean, query: string) => void;
+  filterNode: (scopeNodeId: string, query: string) => void;
+  onFocus: () => void;
+  onBlur: () => void;
+  'aria-controls': string;
+  'aria-activedescendant'?: string;
 }
 
-export function ScopesTreeSearch({ anyChildExpanded, treeNode, onNodeUpdate }: ScopesTreeSearchProps) {
+export function ScopesTreeSearch({
+  anyChildExpanded,
+  treeNode,
+  filterNode,
+  searchArea,
+  onFocus,
+  onBlur,
+  'aria-controls': ariaControls,
+  'aria-activedescendant': ariaActivedescendant,
+}: ScopesTreeSearchProps) {
   const styles = useStyles2(getStyles);
 
   const [inputState, setInputState] = useState<{ value: string; dirty: boolean }>({
@@ -31,7 +45,7 @@ export function ScopesTreeSearch({ anyChildExpanded, treeNode, onNodeUpdate }: S
   useDebounce(
     () => {
       if (inputState.dirty) {
-        onNodeUpdate(treeNode.scopeNodeId, true, inputState.value);
+        filterNode(treeNode.scopeNodeId, inputState.value);
       }
     },
     500,
@@ -42,15 +56,34 @@ export function ScopesTreeSearch({ anyChildExpanded, treeNode, onNodeUpdate }: S
     return null;
   }
 
+  const searchLabel = t('scopes.tree.search', 'Search {{parentTitle}}', {
+    parentTitle: searchArea,
+  });
+
   return (
     <FilterInput
-      placeholder={t('scopes.tree.search', 'Search')}
+      placeholder={searchLabel}
+      // Don't do autofocus for root node
+      autoFocus={treeNode.scopeNodeId !== ''}
+      role="combobox"
+      aria-expanded={true}
+      aria-autocomplete="list"
+      aria-controls={ariaControls}
+      aria-activedescendant={ariaActivedescendant}
+      aria-label={searchLabel}
       value={inputState.value}
       className={styles.input}
       data-testid="scopes-tree-search"
       escapeRegex={false}
       onChange={(value) => {
         setInputState({ value, dirty: true });
+      }}
+      onFocus={onFocus}
+      onBlur={() => {
+        // TODO:Handle weird race condition where the blur event interupts selection of a radio button. This is because disableHighlighting is called, which forces a re-render of the tree. This re-render causes the radio button to lose focus, and the selection to be interrupted.
+        setTimeout(() => {
+          onBlur();
+        }, 0);
       }}
     />
   );

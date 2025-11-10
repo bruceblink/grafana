@@ -88,9 +88,10 @@ export class UnThemedTableInputCSV extends PureComponent<Props, State> {
               return (
                 <span key={index}>
                   <Trans i18nKey="grafana-ui.table.csv-counts">
-                    Rows:{{ rows }}, Columns:{{ columns }} &nbsp;
-                    <Icon name="check-circle" />
+                    Rows:{{ rows }}, Columns:{{ columns }}
                   </Trans>
+                  &nbsp;
+                  <Icon name="check-circle" />
                 </span>
               );
             })}
@@ -101,6 +102,11 @@ export class UnThemedTableInputCSV extends PureComponent<Props, State> {
   }
 }
 
+/**
+ * @deprecated
+ *
+ * https://developers.grafana.com/ui/latest/index.html?path=/docs/inputs-deprecated-tableinputcsv--docs
+ */
 export const TableInputCSV = withTheme2(UnThemedTableInputCSV);
 TableInputCSV.displayName = 'TableInputCSV';
 
@@ -117,8 +123,9 @@ const getStyles = stylesFactory((theme: GrafanaTheme2) => {
       position: 'absolute',
       bottom: '15px',
       right: '15px',
-      border: '1px solid #222',
+      border: `1px solid ${theme.colors.success.border}`,
       background: theme.colors.success.main,
+      color: theme.colors.success.contrastText,
       padding: `1px ${theme.spacing(0.5)}`,
       fontSize: '80%',
     }),

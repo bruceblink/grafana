@@ -1,32 +1,32 @@
 import { css } from '@emotion/css';
 
-import { GrafanaTheme2 } from '@grafana/data';
+import { FeatureState, GrafanaTheme2 } from '@grafana/data';
 import { Trans } from '@grafana/i18n';
-import { Stack, Text, Box, LinkButton, useStyles2 } from '@grafana/ui';
-import { Repository } from 'app/api/clients/provisioning/v0alpha1';
+import { Box, FeatureBadge, LinkButton, Stack, Text, TextLink, useStyles2 } from '@grafana/ui';
 
-import { ConnectRepositoryButton } from '../Shared/ConnectRepositoryButton';
+import { RepositoryTypeCards } from '../Shared/RepositoryTypeCards';
+import { isOnPrem } from '../utils/isOnPrem';
 
 interface FeaturesListProps {
-  repos?: Repository[];
   hasRequiredFeatures: boolean;
   onSetupFeatures: () => void;
 }
 
-export const FeaturesList = ({ repos, hasRequiredFeatures, onSetupFeatures }: FeaturesListProps) => {
+export const FeaturesList = ({ hasRequiredFeatures, onSetupFeatures }: FeaturesListProps) => {
   const styles = useStyles2(getStyles);
 
   return (
     <Stack direction="column" gap={3}>
       <Text variant="h2">
         <Trans i18nKey="provisioning.features-list.manage-your-dashboards-with-remote-provisioning">
-          Get started with GitSync
-        </Trans>
+          Get started with Git Sync
+        </Trans>{' '}
+        {!isOnPrem() && <FeatureBadge featureState={FeatureState.privatePreview} />}
       </Text>
       <ul className={styles.featuresList}>
         <li>
           <Trans i18nKey="provisioning.features-list.manage-dashboards-provision-updates-automatically">
-            Manage dashboards as code in GitHub and provision updates automatically
+            Manage dashboards as code in Git and provision updates automatically
           </Trans>
         </li>
         <li>
@@ -35,6 +35,20 @@ export const FeaturesList = ({ repos, hasRequiredFeatures, onSetupFeatures }: Fe
           </Trans>
         </li>
       </ul>
+      <Text>
+        <Trans i18nKey="provisioning.features-list.learn-more-documentation">
+          Want to learn more? See our{' '}
+          <TextLink
+            external
+            href={
+              'https://grafana.com/docs/grafana-cloud/developer-resources/observability-as-code/provision-resources'
+            }
+          >
+            documentation
+          </TextLink>
+          .
+        </Trans>
+      </Text>
       {!hasRequiredFeatures ? (
         <Box>
           <LinkButton fill="outline" onClick={onSetupFeatures}>
@@ -45,7 +59,7 @@ export const FeaturesList = ({ repos, hasRequiredFeatures, onSetupFeatures }: Fe
         </Box>
       ) : (
         <Stack direction="row" alignItems="center" gap={2}>
-          <ConnectRepositoryButton items={repos} />
+          <RepositoryTypeCards />
         </Stack>
       )}
     </Stack>
